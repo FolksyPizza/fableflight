@@ -1074,6 +1074,8 @@ fn cs_band(h: f32) -> vec3f {
   return select(select(vec3f(0.0, 0.0, 1.0), vec3f(0.0, 1.0, 0.0), f < 2.0), vec3f(1.0, 0.0, 0.0), f < 1.0);
 }
 fn cshadow_ray(px: vec2f, ext: f32) -> vec4f {
+  // Shadows of the clouds as drawn (eroded), not of their whole envelopes.
+  g_mean_erode = true;
   let base = G.cs[9].x;
   let rg = G.planet.w;
   let R = rg + base;

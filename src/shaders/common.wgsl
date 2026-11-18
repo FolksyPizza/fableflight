@@ -1057,6 +1057,14 @@ fn column_top(wx: Weather) -> f32 {
 // How much of the erosion to apply (the cloud march fades it out with distance:
 // cells a few pixels across aliased into worm-like ridges on distant towers).
 var<private> g_erode: f32 = 1.0;
+// Set by the cloud shadow map: without detail, erode by the erosion noise's mean
+// (EF_MEAN) instead of not at all. Uneroded, every cloud cast the shadow of its
+// whole envelope (the band the erosion carves away is most of a thin
+// puff), so shadows stood bigger and darker than the clouds above them. Costs
+// no texture reads.
+var<private> g_mean_erode: bool = false;
+// Mean of the erosion noise (its Worley fbm, noise3d.wgsl GBA channels).
+const EF_MEAN = 0.48;
 // The rain deck rises against a storm tower's foot (m, within this far of its
 // envelope), a broad swell instead of a flat sheet butting into a wall.
 const DECK_SWELL = 650.0;
@@ -1124,6 +1132,7 @@ fn cloud_shape_f(pp: vec3f, h: f32, wx: Weather, detail: bool, fine: f32) -> f32
   // the cumulus outlines into cauliflower lobes.
   var wv = vec3f(0.0);
   if (detail) { wv = textureSampleLevel(t_noise, s_repeat, (pp + wind * 1.15) / 2900.0 + vec3f(0.31, 0.62, 0.17), 0.0).gba - 0.62; }
+  else if (g_mean_erode) { wv = vec3f(EF_MEAN - 0.62); }
   var d = 0.0;
   if (cumulus && cuw < 1.0) {
     // Flat bases; tops that round off as only the strongest cores reach them.
@@ -1235,23 +1244,26 @@ fn cloud_shape_f(pp: vec3f, h: f32, wx: Weather, detail: bool, fine: f32) -> f32
     d = max(d, mix(remap(body * env, 0.2, 1.0, 0.0, 1.0), body * env, anvil));
   }
   if (d <= 0.0) { return smooth_d * far; }
-  if (detail) {
-    // Curl-like warp so the erosion swirls instead of looking like stamped noise.
-    let pe = pp + wind * 1.3 + wv * 420.0;
-    let e = textureSampleLevel(t_noise, s_repeat, pe / CLOUD_DETAIL, 0.0);
-    var ef = e.g * 0.625 + e.b * 0.25 + e.a * 0.125;
-    // In the anvil the ice is drawn out along the wind into fibres: the same
-    // noise stretched 4x downwind. (A stretch scaled by the anvil weight would
-    // slide the noise by kilometres wherever that weight changes.)
-    if (anvil > 0.02) {
-      let ps = pe - G.storm.xyz * (dot(pe, G.storm.xyz) * 0.75);
-      let ea = textureSampleLevel(t_noise, s_repeat, ps / CLOUD_DETAIL + vec3f(0.37, 0.11, 0.73), 0.0);
-      ef = mix(ef, ea.g * 0.5 + ea.b * 0.3 + ea.a * 0.2, anvil);
-    }
-    if (fine > 0.0) {
-      // Close up, a finer octave keeps the billows crisp instead of going soft.
-      let e2 = textureSampleLevel(t_noise, s_repeat, pe / CLOUD_FINE + vec3f(0.17, 0.59, 0.43), 0.0);
-      ef = mix(ef, ef * 0.72 + (e2.g * 0.7 + e2.b * 0.3) * 0.28, fine);
+  if (detail || g_mean_erode) {
+    var ef = EF_MEAN;
+    if (detail) {
+      // Curl-like warp so the erosion swirls instead of looking like stamped noise.
+      let pe = pp + wind * 1.3 + wv * 420.0;
+      let e = textureSampleLevel(t_noise, s_repeat, pe / CLOUD_DETAIL, 0.0);
+      ef = e.g * 0.625 + e.b * 0.25 + e.a * 0.125;
+      // In the anvil the ice is drawn out along the wind into fibres: the same
+      // noise stretched 4x downwind. (A stretch scaled by the anvil weight would
+      // slide the noise by kilometres wherever that weight changes.)
+      if (anvil > 0.02) {
+        let ps = pe - G.storm.xyz * (dot(pe, G.storm.xyz) * 0.75);
+        let ea = textureSampleLevel(t_noise, s_repeat, ps / CLOUD_DETAIL + vec3f(0.37, 0.11, 0.73), 0.0);
+        ef = mix(ef, ea.g * 0.5 + ea.b * 0.3 + ea.a * 0.2, anvil);
+      }
+      if (fine > 0.0) {
+        // Close up, a finer octave keeps the billows crisp instead of going soft.
+        let e2 = textureSampleLevel(t_noise, s_repeat, pe / CLOUD_FINE + vec3f(0.17, 0.59, 0.43), 0.0);
+        ef = mix(ef, ef * 0.72 + (e2.g * 0.7 + e2.b * 0.3) * 0.28, fine);
+      }
     }
     // Worley is brightest at cell centres. Eroding by its inverse keeps round
     // bulges (cauliflower billows); eroding by it directly leaves ragged, wispy
