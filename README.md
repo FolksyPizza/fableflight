@@ -46,9 +46,15 @@ Select **Start flight**. The planner fades as the camera moves to the view above
 
 The 5400 × 2700 globe image is built into the executable. FableFlight generates terrain and scenery from its default imagery, elevation and vector sources with Google Maps turned off. If imagery is unavailable, it can still draw terrain using the bundled globe and any available land-cover and elevation data. A fresh offline install uses bundled NASA imagery and six-arc-minute NOAA elevation samples for 3D terrain. The terrain keeps mapped runways level at the published airport elevation. Detailed satellite scenery and city geometry depend on available map tiles. [NASA Blue Marble Next Generation](https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/base-topography/) · [NOAA ETOPO1 elevation source](https://www.ncei.noaa.gov/products/etopo-global-relief-model)
 
+## Graphics presets
+
+Choose **Ultra** in **Settings → Graphics** on a high-end GPU such as the Radeon RX 9070 XT. Ultra traces volumetric clouds at the scene’s full resolution with finer march steps. It uses more closely spaced reflection samples on water and building glass, a weighted filter for the 6K sun shadows, and longer scenery detail distances. Ultra starts at native resolution. Increase **Render resolution** separately to supersample, or lower **Clouds** or **Reflections** individually if frame rate drops.
+
+To try Ultra and log frame timing for one run, use `cargo run --release --locked -- --graphics ultra --fps-log`. Frame rate depends on the resolution, scene, weather, drivers, and GPU.
+
 ## Graphics on Apple silicon
 
-Native Apple silicon builds start on **Low** with a fresh graphics configuration. Low renders the scene at 60% of the window resolution, launches about one-quarter as many cloud rays as the other presets at the same scene resolution, and uses the base terrain mesh. The interface renders at window resolution. With a saved configuration, choose **Low** in **Settings → Graphics** or compare another preset for a single run using `cargo run --release -- --graphics low --fps-log`. The log includes the adapter and rendering backend, internal resolution, average FPS and slowest frame. Compare presets at the same location, weather, view and window size after scenery has settled.
+Native Apple silicon builds start on **Low** with a fresh graphics configuration. Low renders the scene at 60% of the window resolution, launches one-quarter as many cloud rays as High at the same scene resolution, and uses the base terrain mesh. The interface renders at window resolution. With a saved configuration, choose **Low** in **Settings → Graphics** or compare another preset for a single run using `cargo run --release -- --graphics low --fps-log`. The log includes the adapter and rendering backend, internal resolution, average FPS and slowest frame. Compare presets at the same location, weather, view and window size after scenery has settled.
 
 ## Storage and removal
 

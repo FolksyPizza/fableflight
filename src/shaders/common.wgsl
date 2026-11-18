@@ -16,7 +16,7 @@ struct Globals {
   vol_o: vec4f,      // explosion volume corner relative to camera, w cell size
   vol_u: vec4f,      // volume up axis, w = 1 while it holds smoke
   misc: vec4f,       // near plane, city glow 0..1, water quality, pixel angle
-  csm: vec4f,        // world size of a shadow texel in each cascade, w = shadows on
+  csm: vec4f,        // world size of a shadow texel in each cascade, w = 0 off, 1 standard, 2 fine filtering
   scorch: array<vec4f, 8>,
   crater: array<vec4f, 8>,  // xyz relative to camera, w radius
   prev_vp: mat4x4f,  // last frame's view-projection (without its sub-pixel offset), relative to last frame's camera
@@ -157,7 +157,10 @@ struct Cascade { vp: mat4x4f };
 const PI = 3.14159265;
 
 // Keep in sync with renderer target allocation.
-fn cloud_pixel_divisor() -> i32 { return select(2, 4, G.quality.x > 1.5); }
+fn cloud_pixel_divisor() -> i32 {
+  if (G.quality.x < 0.8) { return 1; }
+  return select(2, 4, G.quality.x > 1.5);
+}
 const ATM_H = 100000.0;
 const RAYLEIGH = vec3f(5.802e-6, 13.558e-6, 33.1e-6);
 const MIE_S = 3.996e-6;
@@ -1430,11 +1433,24 @@ fn shadow_world(P: vec3f, N: vec3f) -> f32 {
     let e = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
     if (e <= 0.0 || q.z <= 0.0 || q.z >= 1.0) { continue; }
     var sh = 0.0;
-    for (var j = -1; j <= 1; j++) { for (var i = -1; i <= 1; i++) {
-      sh += textureSampleCompareLevel(t_shadow, s_shadow, uv + vec2f(f32(i), f32(j)) * texel, c, q.z - 0.00003);
-    } }
+    if (G.csm.w > 1.5) {
+      // A tent kernel keeps contact edges sharp without emphasizing the texel grid.
+      for (var j = -2; j <= 2; j++) {
+        for (var i = -2; i <= 2; i++) {
+          let tap = uv + vec2f(f32(i), f32(j)) * (0.8 * texel);
+          let weight = f32((3 - abs(i)) * (3 - abs(j)));
+          sh += weight * textureSampleCompareLevel(t_shadow, s_shadow, tap, c, q.z - 0.00003);
+        }
+      }
+      sh /= 81.0;
+    } else {
+      for (var j = -1; j <= 1; j++) { for (var i = -1; i <= 1; i++) {
+        sh += textureSampleCompareLevel(t_shadow, s_shadow, uv + vec2f(f32(i), f32(j)) * texel, c, q.z - 0.00003);
+      } }
+      sh /= 9.0;
+    }
     let w = smoothstep(0.0, 0.07, e);
-    acc += rem * w * sh / 9.0;
+    acc += rem * w * sh;
     rem *= 1.0 - w;
     if (rem < 0.01) { break; }
   }

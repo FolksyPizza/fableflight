@@ -416,10 +416,13 @@ fn depth_match(a: f32, b: f32) -> f32 {
   let q = hp * div;
   let edge = vec2i(textureDimensions(t_depth)) - 1;
   let far = min(q + vec2i(div - 1), edge);
-  let z4 = vec4f(textureLoad(t_depth, q, 0), textureLoad(t_depth, vec2i(far.x, q.y), 0),
-                 textureLoad(t_depth, vec2i(q.x, far.y), 0), textureLoad(t_depth, far, 0));
-  var z = min(min(z4.x, z4.y), min(z4.z, z4.w));
-  if (((hp.x + hp.y) & 1) == 0) { z = max(max(z4.x, z4.y), max(z4.z, z4.w)); }
+  var z = textureLoad(t_depth, q, 0);
+  if (div > 1) {
+    let z4 = vec4f(z, textureLoad(t_depth, vec2i(far.x, q.y), 0),
+                   textureLoad(t_depth, vec2i(q.x, far.y), 0), textureLoad(t_depth, far, 0));
+    z = min(min(z4.x, z4.y), min(z4.z, z4.w));
+    if (((hp.x + hp.y) & 1) == 0) { z = max(max(z4.x, z4.y), max(z4.z, z4.w)); }
+  }
   var tscene = 1e9;
   if (z > 0.0) { tscene = length(ray / z); }
   o.dist.y = min(tscene * 0.001, SKY_KM);
@@ -1012,7 +1015,14 @@ fn depth_match(a: f32, b: f32) -> f32 {
 @group(1) @binding(5) var t_color: texture_2d<f32>;
 fn cloud_at(pos: vec2f, d: f32) -> vec4f {
   let dims = vec2i(textureDimensions(t_cloud));
-  let f = pos / f32(cloud_pixel_divisor()) - 0.5;
+  let div = cloud_pixel_divisor();
+  if (div == 1) {
+    let pixel = clamp(vec2i(pos), vec2i(0), dims - 1);
+    if (depth_match(textureLoad(t_cdist, pixel, 0).g, d) > 0.995) {
+      return textureLoad(t_cloud, pixel, 0);
+    }
+  }
+  let f = pos / f32(div) - 0.5;
   let b = vec2i(floor(f));
   let fr = f - floor(f);
   var acc = vec4f(0.0);

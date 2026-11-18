@@ -16,43 +16,78 @@ fn wtex(uv: vec2f, size: f32, fp: f32) -> vec4f {
   return textureSampleLevel(t_wave, s_repeat, uv, log2(max(fp * 256.0 / size, 1.0)));
 }
 
+fn reflection_sample(uv: vec2f, dims: vec2f, pixel: vec2i, color: vec3f) -> vec3f {
+  // Smooth the hit without blending in sky, water tint or another silhouette.
+  let hit_z = textureLoad(t_depth, pixel, 0);
+  let texel = uv * dims - 0.5;
+  let base = vec2i(floor(texel));
+  let w = fract(texel);
+  var sum = vec3f(0.0);
+  var total = 0.0;
+  for (var y = 0; y < 2; y++) {
+    for (var x = 0; x < 2; x++) {
+      let p = clamp(base + vec2i(x, y), vec2i(0), vec2i(dims) - 1);
+      let tap = textureLoad(t_color, p, 0);
+      let z = textureLoad(t_depth, p, 0);
+      if (tap.a < 0.99 || textureLoad(t_aux, p, 0).a > 0.004 || abs(z - hit_z) > hit_z * 0.045) { continue; }
+      let weight = select(1.0 - w.x, w.x, x == 1) * select(1.0 - w.y, w.y, y == 1);
+      sum += tap.rgb * weight;
+      total += weight;
+    }
+  }
+  if (total < 0.01) { return color; }
+  return sum / total;
+}
+
 fn ssr(P: vec3f, R: vec3f, jit: f32) -> vec4f {
   let dims = vec2f(textureDimensions(t_depth));
-  var step_len = max(length(P) * 0.012, 0.4);
+  let limit = vec2i(dims) - 1;
+  let fine = G.misc.z > 1.5;
+  var step_len = max(length(P) * select(0.012, 0.006, fine), select(0.4, 0.25, fine));
   var t = step_len * (0.5 + jit);
   var prev = 0.0;
-  for (var i = 0; i < 30; i++) {
+  for (var i = 0; i < select(30, 54, fine); i++) {
     let q = P + R * t;
     let clip = G.view_proj * vec4f(q, 1.0);
     if (clip.w <= 0.0) { break; }
     let ndc = clip.xyz / clip.w;
     let uv = ndc.xy * vec2f(0.5, -0.5) + 0.5;
-    if (any(uv < vec2f(0.0)) || any(uv > vec2f(1.0))) { break; }
-    let zs = textureLoad(t_depth, vec2i(uv * dims), 0);
+    if (any(uv < vec2f(0.0)) || any(uv > vec2f(1.0)) || ndc.z <= 0.0 || ndc.z > 1.0) { break; }
+    let zs = textureLoad(t_depth, min(vec2i(uv * dims), limit), 0);
     if (zs > ndc.z) {
-      // Behind a surface: is it a thin enough crossing to be a real hit?
-      let ds = G.misc.x / zs;
-      let dr = G.misc.x / ndc.z;
-      if (dr - ds > max(step_len * 2.5, 8.0)) { break; }
+      // At standard quality reject coarse jumps before spending taps refining.
+      if (!fine && G.misc.x / ndc.z - G.misc.x / zs > max(step_len * 2.5, 8.0)) { break; }
       var lo = prev;
       var hi = t;
       var huv = uv;
-      for (var k = 0; k < 5; k++) {
+      var hz = ndc.z;
+      for (var k = 0; k < select(5, 7, fine); k++) {
         let m = (lo + hi) * 0.5;
         let c2 = G.view_proj * vec4f(P + R * m, 1.0);
         let n2 = c2.xyz / c2.w;
-        huv = n2.xy * vec2f(0.5, -0.5) + 0.5;
-        if (textureLoad(t_depth, vec2i(huv * dims), 0) > n2.z) { hi = m; } else { lo = m; }
+        let p = n2.xy * vec2f(0.5, -0.5) + 0.5;
+        let px = clamp(vec2i(p * dims), vec2i(0), limit);
+        if (textureLoad(t_depth, px, 0) > n2.z) {
+          hi = m;
+          huv = p;
+          hz = n2.z;
+        } else {
+          lo = m;
+        }
       }
-      let px = vec2i(huv * dims);
+      let px = clamp(vec2i(huv * dims), vec2i(0), limit);
       let c = textureLoad(t_color, px, 0);
-      // (any water share at all: its samples hold the unlit tint, not a colour)
-      if (textureLoad(t_aux, px, 0).a > 0.004 || c.a < 0.99 || textureLoad(t_depth, px, 0) == 0.0) { break; }
+      let surface = textureLoad(t_depth, px, 0);
+      // A depth jump from the object to the distant background is not a hit.
+      if (textureLoad(t_aux, px, 0).a > 0.004 || c.a < 0.99 || surface <= 0.0) { break; }
+      if (fine && G.misc.x / max(hz, 1e-8) - G.misc.x / surface > clamp(step_len * 0.2, 0.9, 10.0)) { break; }
       let e = min(min(huv.x, 1.0 - huv.x), min(huv.y, 1.0 - huv.y));
-      return vec4f(c.rgb, smoothstep(0.0, 0.08, e));
+      var rgb = c.rgb;
+      if (fine) { rgb = reflection_sample(huv, dims, px, rgb); }
+      return vec4f(rgb, smoothstep(0.0, 0.08, e));
     }
     prev = t;
-    step_len *= 1.22;
+    step_len *= select(1.22, 1.13, fine);
     t += step_len;
   }
   return vec4f(0.0);

@@ -23,7 +23,7 @@ pub(crate) fn msaa() -> u32 {
 
 // Keep in sync with cloud_pixel_divisor in common.wgsl.
 fn cloud_divisor(step: f32) -> u32 {
-    if step > 1.5 { 4 } else { 2 }
+    if step > 1.5 { 4 } else if step < 0.8 { 1 } else { 2 }
 }
 const MAX_INST: usize = 16384;
 const MAX_FALL: usize = 4096;
@@ -2242,8 +2242,11 @@ impl Renderer {
 
         let egui = egui_wgpu::Renderer::new(d, out_format(&config), egui_wgpu::RendererOptions::default());
         let (w, h) = Self::scaled_size(d, &config, gfx.scale);
-        log::info!("Scene: {w}x{h}, window {}x{}, shadows {}, AO {}", config.width, config.height, gfx.shadows.name(), gfx.ao);
-        let targets = Self::make_targets(d, &config, (w, h), cloud_divisor(gfx.cloud_step()), &l_dres, &l_ao, &l_composite, &l_cloud, &l_cloud_apply, &l_cloud_temporal, &l_post, &l_pdraw, &l_glass, &psim_ub, &pbuf, &black);
+        let cloud_div = cloud_divisor(gfx.cloud_step());
+        log::info!("Scene: {w}x{h}, window {}x{}, clouds {}x{}, reflections {}, shadows {}, AO {}",
+            config.width, config.height, w.div_ceil(cloud_div), h.div_ceil(cloud_div),
+            gfx.reflections.name(), gfx.shadows.name(), gfx.ao);
+        let targets = Self::make_targets(d, &config, (w, h), cloud_div, &l_dres, &l_ao, &l_composite, &l_cloud, &l_cloud_apply, &l_cloud_temporal, &l_post, &l_pdraw, &l_glass, &psim_ub, &pbuf, &black);
         let fluid_t = fluid.draw_targets(d, &targets.depth, w, h);
         // The transmittance and multi-scatter tables depend only on the planet
         // and the haze: bake them now, and again whenever the haze changes.

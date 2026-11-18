@@ -1,7 +1,7 @@
 //! Graphics settings: how hard the renderer works, as presets (Low, Medium,
 //! High, Ultra) or tuned one by one. High is what the game always drew before
-//! these settings existed; Ultra goes past it (supersampling, a finer shadow
-//! map, finer cloud steps, terrain and scenery further out). Saved in
+//! these settings existed. Ultra adds full-resolution volumetrics, finer
+//! reflections and shadow filtering, and more distant scenery. Saved in
 //! `<config>/fablegame/graphics.json`.
 //!
 //! Google's photorealistic 3D tiles are not part of this: they are switched on
@@ -56,6 +56,8 @@ pub struct Graphics {
     pub shadows: Level,
     pub clouds: Level,
     pub terrain: Level,
+    /// Screen-space reflections on water and building glass.
+    pub reflections: Level,
     /// how far out buildings and trees are loaded
     pub scenery: Level,
     /// how far out buildings keep their full geometry, dressing and window depth
@@ -94,7 +96,7 @@ impl Graphics {
 
     /// One of the presets (taa and vsync on).
     pub fn preset(l: Level) -> Self {
-        let mut g = Graphics { scale: 1.0, shadows: Level::High, clouds: Level::High, terrain: Level::High, scenery: Level::High, city: Level::High, trees: Level::High, cars: Level::High, ao: true, taa: true, vsync: true, fps_cap: 0 };
+        let mut g = Graphics { scale: 1.0, shadows: Level::High, clouds: Level::High, terrain: Level::High, reflections: Level::High, scenery: Level::High, city: Level::High, trees: Level::High, cars: Level::High, ao: true, taa: true, vsync: true, fps_cap: 0 };
         g.apply(l);
         g
     }
@@ -103,7 +105,8 @@ impl Graphics {
     pub fn apply(&mut self, l: Level) {
         let l = if l == Level::Off { Level::Low } else { l };
         // each preset down roughly halves gpu work, resolution first, then shadows.
-        self.scale = l.pick(0.6, 0.75, 1.0, 1.5) as f32;
+        // Budget Ultra's extra GPU time for effects. Supersampling is independent.
+        self.scale = l.pick(0.6, 0.75, 1.0, 1.0) as f32;
         self.shadows = match l {
             Level::Off | Level::Low => Level::Off,
             Level::Medium => Level::Low,
@@ -111,6 +114,7 @@ impl Graphics {
         };
         self.clouds = l;
         self.terrain = l;
+        self.reflections = Self::legacy_reflections(l);
         self.scenery = l;
         self.city = l;
         self.trees = l;
@@ -149,6 +153,19 @@ impl Graphics {
     /// Length of the cloud raymarch's steps relative to High (clouds.wgsl).
     pub fn cloud_step(&self) -> f32 {
         self.clouds.pick(1.8, 1.35, 1.0, 0.7) as f32
+    }
+
+    fn legacy_reflections(terrain: Level) -> Level {
+        match terrain {
+            Level::Off | Level::Low => Level::Low,
+            Level::Ultra => Level::Ultra,
+            _ => Level::High,
+        }
+    }
+
+    /// 0 uses the environment, 1 adds screen-space reflections, 2 refines them.
+    pub fn reflection_quality(&self) -> f32 {
+        self.reflections.pick(0.0, 1.0, 1.0, 2.0) as f32
     }
 
     /// Terrain tile split threshold (tile width / distance, world.rs `lod_k`):
@@ -197,6 +214,10 @@ impl Graphics {
     /// The saved settings, if the file can be read.
     pub fn load() -> Option<Self> {
         let j: serde_json::Value = serde_json::from_slice(&std::fs::read(Self::path()?).ok()?).ok()?;
+        Self::from_json(&j)
+    }
+
+    fn from_json(j: &serde_json::Value) -> Option<Self> {
         j.as_object()?;
         let mut g = Self::default();
         g.fps_cap = j["fps_cap"].as_u64().map(|v| v as u16).filter(|v| [0, 30, 60, 90, 120, 144, 165, 240].contains(v)).unwrap_or(0);
@@ -214,6 +235,12 @@ impl Graphics {
         g.shadows = j["shadows"].as_str().and_then(Level::parse).unwrap_or(g.shadows);
         g.clouds = lvl("clouds", g.clouds);
         g.terrain = lvl("terrain", g.terrain);
+        // Older profiles inferred screen-space reflections from terrain quality.
+        let legacy = if g.terrain == Level::Low { Level::Low } else { Level::High };
+        g.reflections = match lvl("reflections", legacy) {
+            Level::Medium => Level::High,
+            level => level,
+        };
         g.scenery = lvl("scenery", g.scenery);
         g.city = lvl("city", g.city);
         g.trees = lvl("trees", g.trees);
@@ -232,6 +259,7 @@ impl Graphics {
             "shadows": self.shadows.name(),
             "clouds": self.clouds.name(),
             "terrain": self.terrain.name(),
+            "reflections": self.reflections.name(),
             "scenery": self.scenery.name(),
             "city": self.city.name(),
             "trees": self.trees.name(),
@@ -274,7 +302,7 @@ impl Graphics {
             Some(Level::Low) => "Low: 60% resolution, lighter clouds and terrain, nearer scenery, no shadows or ambient occlusion.",
             Some(Level::Medium) => "Medium: 75% resolution, a coarse shadow map, no ambient occlusion and a lighter version of everything else.",
             Some(Level::High) => "High: the full look at the window's own resolution (what the game has always drawn).",
-            Some(Level::Ultra) => "Ultra: past High. Supersampled at 150%, a 6K shadow map, finer clouds, terrain and scenery further out. Wants a strong GPU.",
+            Some(Level::Ultra) => "Ultra: full-resolution volumetric clouds, finer reflections, filtered 6K sun shadows, and more distant scenery.",
             _ => "Custom: tuned one by one below.",
         });
     }
@@ -301,7 +329,14 @@ impl Graphics {
                 dim(ui, format!("{r}×{r} map"));
             }
         });
-        row(ui, "Clouds", "", |ui| levels(ui, &mut self.clouds, false));
+        row(ui, "Clouds", "Ultra traces clouds at scene resolution", |ui| levels(ui, &mut self.clouds, false));
+        row(ui, "Reflections", "water and building glass", |ui| {
+            menu::segments(ui, |ui| {
+                menu::seg(ui, &mut self.reflections, Level::Low, "Environment");
+                menu::seg(ui, &mut self.reflections, Level::High, "Screen space");
+                menu::seg(ui, &mut self.reflections, Level::Ultra, "Detailed");
+            });
+        });
         row(ui, "Terrain detail", "", |ui| levels(ui, &mut self.terrain, false));
         row(ui, "Scenery distance", "", |ui| {
             levels(ui, &mut self.scenery, false);
@@ -376,6 +411,18 @@ mod tests {
         let mut low = Graphics::preset(Level::Low);
         low.scale = SCALE_MIN;
         assert_eq!(low.samples(), 2);
+    }
+
+    #[test]
+    fn profiles_preserve_legacy_reflections_and_opt_in_to_ultra() {
+        let low = Graphics::from_json(&serde_json::json!({"preset": "Low"})).unwrap();
+        let ultra = Graphics::from_json(&serde_json::json!({"preset": "Ultra"})).unwrap();
+        let old_custom = Graphics::from_json(&serde_json::json!({"terrain": "Ultra", "scale": 1.25})).unwrap();
+        let custom = Graphics::from_json(&serde_json::json!({"terrain": "Low", "reflections": "Ultra"})).unwrap();
+        assert_eq!((low.scale, low.reflection_quality(), low.shadow_res()), (0.6, 0.0, 256));
+        assert_eq!((ultra.scale, ultra.reflection_quality(), ultra.shadow_res()), (1.0, 2.0, 6144));
+        assert_eq!((old_custom.scale, old_custom.reflection_quality()), (1.25, 1.0));
+        assert_eq!(custom.reflection_quality(), 2.0);
     }
 
     #[test]

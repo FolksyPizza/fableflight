@@ -5508,8 +5508,8 @@ impl Game {
             vol_o: [0.0; 4],
             vol_u: [0.0; 4],
             // screen space reflections on water and glass, off on low.
-            misc: [near, self.city_glow, if self.gfx.terrain == graphics::Level::Low { 0.0 } else { 1.0 }, 2.0 * (fov * 0.5).tan() / rh],
-            csm: [CASC[0] * 2.0 / sres, CASC[1] * 2.0 / sres, CASC[2] * 2.0 / sres, if shadow_on { 1.0 } else { 0.0 }],
+            misc: [near, self.city_glow, self.gfx.reflection_quality(), 2.0 * (fov * 0.5).tan() / rh],
+            csm: [CASC[0] * 2.0 / sres, CASC[1] * 2.0 / sres, CASC[2] * 2.0 / sres, if !shadow_on { 0.0 } else if self.gfx.shadows == graphics::Level::Ultra { 2.0 } else { 1.0 }],
             scorch: [[0.0; 4]; 8],
             crater: [[0.0; 4]; 8],
             prev_vp: self.prev_vp,
