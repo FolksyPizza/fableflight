@@ -48,7 +48,7 @@ impl crate::Game {
         let k = self.menu.aircraft.min(n - 1);
         let spec = list[k];
         let tex = self.still(ctx, spec);
-        let air = egui::Area::new(egui::Id::unique("menu_air")).fixed_pos(at).show(ctx, |ui| {
+        let air = egui::Area::new(egui::Id::unique("menu_air")).fixed_pos(at).constrain(false).show(ctx, |ui| {
             ui.set_width(w);
             ui.spacing_mut().item_spacing.y = 0.0;
             let top = egui::CornerRadius { nw: menu::R_PANEL, ne: menu::R_PANEL, sw: 0, se: 0 };
@@ -76,7 +76,7 @@ impl crate::Game {
             });
             // The picture: click it for the aircraft screen.
             // a little shorter than the picture, which keeps its shape (its edges are empty)
-            let ph = w * 0.46;
+            let ph = (ctx.content_rect().height() - 570.0).clamp(46.0, w * 0.46);
             let (pic, resp) = ui.allocate_exact_size(egui::vec2(w, ph), egui::Sense::click());
             ui.painter().rect_filled(pic, 0.0, menu::PANEL);
             let iw = (ph * 680.0 / 392.0 * 1.08).min(w);

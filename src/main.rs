@@ -3529,6 +3529,7 @@ impl Game {
         self.name_rx = None;
         self.goto_rx = None;
         self.set_aircraft(aircraft::nth(self.menu.aircraft));
+        self.r.want_obj_kind(self.spec.id as u32);
         // Remembered for next time (the globe opens on it; the main menu offers it again).
         let db = airports::Db::get();
         self.last_start = Some(settings::LastStart {
@@ -5093,9 +5094,12 @@ impl Game {
                 }
             }
         }
-        let params = self.instruments(agl);
+        // At cloud height the aircraft glass would cause a full-resolution
+        // scene copy for subpixel geometry. The shader warms up during loading.
+        let draw_aircraft = !in_menu && !preparing;
+        let params = if draw_aircraft { self.instruments(agl) } else { [[0.0; 4]; 6] };
         let mut own_lights = Vec::new();
-        if !self.crashed && !in_menu {
+        if draw_aircraft && !self.crashed {
             let base = Mat4::from_rotation_translation(self.plane.rot.as_quat(), (self.plane.model_pos() - cam).as_vec3());
             let pose = self.plane.pose(&self.model.pieces);
             // Blades while they can be followed by eye, a blur once they cannot.
@@ -5203,7 +5207,7 @@ impl Game {
             }
             self.own_lights(&base, &pose, params[5], &mut g, &mut own_lights);
         }
-        if !in_menu {
+        if draw_aircraft {
             self.sheds.draw(cam, params, &mut objs);
             // A booster just let go: its centre engines' flame dying away behind it.
             let ix = |n: &str| self.model.pieces.iter().position(|p| p.name == n);
@@ -5507,14 +5511,16 @@ impl Game {
             // Below it: where to start. Search, places and airports fold away;
             // the chosen spot and take-off stay in view.
             let top = r.bottom() + 12.0;
-            // (the pinned start point and take-off below the list, as tall as last frame)
-            let foot_h = ctx.data(|d| d.get_temp::<f32>(egui::Id::unique("globe_pinned_h"))).unwrap_or(150.0);
-            // (the list gives up its height first: were the panel taller than the
-            // room left, egui would push it up over the aircraft card)
-            let body_h = (screen.bottom() - M - top - 40.0 - 28.0 - foot_h).max(48.0);
-            egui::Area::new(egui::Id::unique("menu")).anchor(Align2::LEFT_TOP, [M, top]).show(ctx, |ui| {
-                ui.set_max_height(screen.bottom() - M - top);
-                menu::panel().inner_margin(egui::Margin::symmetric(16, 14)).show(ui, |ui| {
+            let available = (screen.bottom() - M - top).max(1.0);
+            let foot_id = egui::Id::unique("globe_pinned_h");
+            let foot_h = ctx.data(|d| d.get_temp::<f32>(foot_id)).unwrap_or(235.0);
+            // Scroll the whole panel if its pinned section cannot fit.
+            let body_h = available - 78.0 - foot_h;
+            let scroll_panel = body_h < 104.0;
+            let body_h = if scroll_panel { f32::INFINITY } else { body_h };
+            egui::Area::new(egui::Id::unique("menu")).fixed_pos(egui::pos2(M, top)).constrain(false).show(ctx, |ui| {
+                ui.set_width(W);
+                let mut location = |ui: &mut egui::Ui| menu::panel().inner_margin(egui::Margin::symmetric(16, 14)).show(ui, |ui| {
                     ui.set_width(W - 32.0);
                     menu::window_title(ui, t!("Start location", "Lieu de départ"));
                     egui::ScrollArea::vertical().max_height(body_h).auto_shrink([false, true]).show(ui, |ui| {
@@ -5666,8 +5672,16 @@ impl Game {
                     if ready {
                         self.pad_home_focus(&take_off);
                     }
-                    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("globe_pinned_h"), ui.cursor().top() - pin_top));
+                    ctx.data_mut(|d| d.insert_temp(foot_id, ui.cursor().top() - pin_top));
                 });
+                if scroll_panel {
+                    egui::ScrollArea::vertical().max_height(available).auto_shrink([false, true]).show(ui, |ui| {
+                        location(ui);
+                        padui::follow_focus(ui);
+                    });
+                } else {
+                    location(ui);
+                }
             });
 
             // Give the map room on narrow windows and Retina displays.

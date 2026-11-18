@@ -2539,7 +2539,7 @@ impl Renderer {
     }
     /// ask for the aircraft shader specialised to `kind`, built on a worker thread.
     /// until it is ready the generic pipelines draw everything.
-    fn want_obj_kind(&mut self, kind: u32) {
+    pub(crate) fn want_obj_kind(&mut self, kind: u32) {
         if let Some((k, rx)) = &self.obj_fast_rx {
             if let Ok(f) = rx.try_recv() {
                 self.obj_fast = Some(f);
