@@ -9,8 +9,8 @@
 //!   point, or lined up on an approach (live, so it stays while it applies);
 //! - a systems card at the top left, only for the aircraft that have
 //!   something to show there: a rocket's flight figures, a fighter's weapons.
-use crate::menu::{self, Icon, Page, ACCENT, DIM, TEXT};
-use crate::{padui, t, tr, Game};
+use crate::menu::{self, Icon, Page, DIM, TEXT};
+use crate::{t, Game};
 use egui::{pos2, vec2, Align2, Color32, Rect, RichText, Sense, Stroke};
 
 /// What the toolbar asked for this frame.
@@ -35,12 +35,19 @@ pub fn glass() -> egui::Frame {
     egui::Frame::new().fill(menu::GLASS).stroke(Stroke::new(1.0, menu::LINE)).corner_radius(menu::R_PANEL).inner_margin(egui::Margin::symmetric(14, 10))
 }
 
+pub(crate) fn tools_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(Color32::from_rgba_unmultiplied(13, 19, 27, 247))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(58, 69, 82)))
+        .corner_radius(4)
+}
+
 impl Game {
     /// Draws the toolbar when it is wanted; a press goes into `bar`.
     pub(crate) fn toolbar(&mut self, ctx: &egui::Context, bar: &mut Option<Bar>) {
         let screen = ctx.content_rect();
         let near_top = ctx.pointer_latest_pos().is_some_and(|p| p.y < BAR_EDGE && screen.contains(p));
-        if near_top || self.info_open {
+        if near_top || self.flight_tools_open {
             self.toolbar_t = self.real;
         }
         let want = self.real - self.toolbar_t < BAR_LINGER;
@@ -61,45 +68,52 @@ impl Game {
             (Icon::Camera, if self.cam_mode == 1 { t!("Cockpit", "Cockpit") } else { t!("Chase", "Extérieur") }, Bar::Camera, false),
             (Icon::Pause, t!("Pause", "Pause"), Bar::Pause, false),
         ];
-        let (bw, bh, gap) = (68.0, 54.0, 2.0);
-        // a small gap before the camera and pause, which are not pages
-        let w = bw * items.len() as f32 + gap * (items.len() - 1) as f32 + 2.0 * 16.0 + 16.0;
-        let y = 10.0 - (bh + 24.0) * (1.0 - show);
-        egui::Area::new(egui::Id::unique("toolbar")).order(egui::Order::Foreground).fixed_pos(pos2(screen.center().x - w * 0.5, screen.top() + y)).show(ctx, |ui| {
+        let compact = screen.width() < 710.0;
+        let bw = if compact { ((screen.width() - 32.0) / items.len() as f32).clamp(30.0, 48.0) } else { 85.0 };
+        let bh = 35.0;
+        let w = bw * items.len() as f32 + 12.0;
+        let y = 9.0 - (bh + 23.0) * (1.0 - show);
+        egui::Area::new(egui::Id::unique("toolbar")).order(egui::Order::Foreground)
+            .fixed_pos(pos2(screen.center().x - w * 0.5, screen.top() + y)).constrain(false).show(ctx, |ui| {
             ui.multiply_opacity(show);
-            glass().inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = gap;
+            tools_frame().inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
                 ui.horizontal(|ui| {
-                    for (k, (ic, label, act, on)) in items.into_iter().enumerate() {
-                        if k == 4 || k == 6 {
-                            ui.add_space(6.0);
-                            let r = ui.available_rect_before_wrap();
-                            ui.painter().vline(r.left() - 4.0, r.top() + 10.0..=r.top() + bh - 10.0, Stroke::new(1.0, menu::LINE_HI));
-                            ui.add_space(2.0);
+                    for (k, (icon, label, action, active)) in items.into_iter().enumerate() {
+                        let (rect, response) = ui.allocate_exact_size(vec2(bw, bh), Sense::click());
+                        response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, active, label));
+                        if k == 0 && self.flight_tools_open && !self.info_open {
+                            self.pad_home_focus(&response);
                         }
-                        let (rect, resp) = ui.allocate_exact_size(vec2(bw, bh), Sense::click());
-                        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, label));
-                        let lit = menu::ease(ctx, resp.id, resp.hovered() || resp.has_focus());
-                        let p = ui.painter();
-                        if lit > 0.0 || on {
-                            p.rect_filled(rect, menu::R_WIDGET, Color32::from_white_alpha(if on { 16 } else { (12.0 * lit) as u8 }));
+                        let lit = menu::ease(ctx, response.id, response.hovered() || response.has_focus());
+                        let painter = ui.painter();
+                        if active || lit > 0.0 {
+                            let bg = if active { Color32::from_rgb(28, 48, 69) } else { Color32::from_white_alpha((15.0 * lit) as u8) };
+                            painter.rect_filled(rect.shrink(1.0), 2.0, bg);
                         }
-                        if on {
-                            p.rect_filled(Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 1.5), vec2(rect.width() * 0.5, 3.0)), 1.0, ACCENT);
+                        if active {
+                            let y = rect.bottom() - 2.0;
+                            painter.hline(rect.left() + 7.0..=rect.right() - 7.0, y, Stroke::new(2.0, Color32::from_rgb(133, 187, 241)));
                         }
-                        let col = if on { Color32::WHITE } else { menu::mix(Color32::from_rgb(200, 207, 218), Color32::WHITE, lit) };
-                        menu::icon(p, ic, pos2(rect.center().x, rect.top() + 20.0), 20.0, if on { ACCENT } else { col });
-                        p.text(pos2(rect.center().x, rect.bottom() - 13.0), Align2::CENTER_CENTER, label, menu::caption(), col);
-                        if resp.clicked() {
-                            *bar = Some(act);
+                        if k == 5 {
+                            painter.vline(rect.left(), rect.top() + 6.0..=rect.bottom() - 6.0, Stroke::new(1.0, menu::LINE_HI));
+                        }
+                        let col = menu::mix(TEXT, Color32::WHITE, lit);
+                        let at = if compact { rect.center() } else { rect.left_center() + vec2(13.0, 0.0) };
+                        menu::icon(painter, icon, at, 15.0, col);
+                        if !compact {
+                            painter.text(rect.left_center() + vec2(24.0, 0.0), Align2::LEFT_CENTER, label, menu::medium(12.0), col);
+                        }
+                        let response = response.on_hover_text(label);
+                        if response.clicked() {
+                            *bar = Some(action);
                         }
                     }
                 });
+                if !self.hud_on() && self.menu_hold.is_some() {
+                    ui.label(RichText::new(t!("MENU HOLD", "MAINTIEN MENU")).font(menu::data()).color(menu::OK));
+                }
             });
-            // what opens it from the keyboard or the gamepad, under the bar
-            let hint = if padui::active() { tr("Y + View: flight panel   Menu: pause") } else { t!("Tab: flight panel   Esc: pause", "Tab : panneau de vol   Échap : pause") };
-            let r = ui.min_rect();
-            ui.painter().text(pos2(r.center().x, r.bottom() + 12.0), Align2::CENTER_CENTER, hint, menu::caption(), Color32::from_white_alpha(170));
         });
     }
 
@@ -107,12 +121,16 @@ impl Game {
     pub(crate) fn toolbar_act(&mut self, b: Bar) {
         match b {
             Bar::Page(p) => {
+                if !self.flight_tools_open {
+                    self.set_flight_tools(true);
+                }
                 if self.info_open && self.info_page == p {
                     self.info_open = false;
                 } else {
                     self.info_open = true;
                     self.info_page = p;
                 }
+                self.pad_home = true;
             }
             Bar::Map => self.minimap.visible = !self.minimap.visible,
             Bar::Camera => self.next_view(),
@@ -149,7 +167,7 @@ impl Game {
         }
         if !notes.is_empty() {
             // under the toolbar while it is down
-            let top = if self.real - self.toolbar_t < BAR_LINGER { 104.0 } else { 14.0 };
+            let top = if self.real - self.toolbar_t < BAR_LINGER { 65.0 } else { 14.0 };
             let y = ctx.animate_value_with_time(egui::Id::unique("notes_y"), top, 0.2);
             egui::Area::new(egui::Id::unique("notices")).anchor(Align2::CENTER_TOP, [0.0, y]).interactable(false).show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
@@ -199,8 +217,9 @@ impl Game {
     /// few seconds after it lets go. Above the guidance line when that shows.
     fn ap_strip(&self, ctx: &egui::Context, guidance: bool) {
         let off_for = self.real - self.ap_off_t;
-        let flash = !self.ap.on && off_for < 4.0;
-        if !self.ap.on && !flash {
+        let hold = self.menu_hold.as_ref();
+        let flash = !self.ap.on && hold.is_none() && off_for < 4.0;
+        if !self.ap.on && hold.is_none() && !flash {
             return;
         }
         let lift = if guidance { 44.0 } else { 0.0 };
@@ -209,7 +228,11 @@ impl Game {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 ui.horizontal(|ui| {
                     let mono = egui::FontId::monospace(14.0);
-                    if self.ap.on {
+                    if let Some(hold) = hold {
+                        let label = if hold.at { t!("MENU HOLD  HDG ALT IAS", "MAINTIEN MENU  CAP ALT IAS") }
+                            else { t!("MENU HOLD  HDG ALT", "MAINTIEN MENU  CAP ALT") };
+                        ui.label(RichText::new(label).font(mono).color(menu::OK));
+                    } else if self.ap.on {
                         let (on, armed) = self.ap.annunciation();
                         ui.label(RichText::new("AP").font(mono.clone()).strong().color(menu::OK));
                         for m in on {

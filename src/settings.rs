@@ -5,6 +5,48 @@
 use crate::i18n::Lang;
 use std::path::PathBuf;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CollisionMode {
+    #[default]
+    Recover,
+    EndFlight,
+    Detailed,
+}
+
+impl CollisionMode {
+    pub const ALL: [Self; 3] = [Self::Recover, Self::EndFlight, Self::Detailed];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Recover => "recover",
+            Self::EndFlight => "end-flight",
+            Self::Detailed => "detailed",
+        }
+    }
+
+    pub fn parse(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.key() == key)
+    }
+
+    pub fn description(self) -> &'static str {
+        use crate::i18n::t;
+        match self {
+            Self::Recover => t!("Recover nearby after a severe impact.", "Reprenez à proximité après un impact sévère."),
+            Self::EndFlight => t!("Stop the flight at impact and show a restart screen.", "Interrompt le vol à l’impact et propose de reprendre."),
+            Self::Detailed => t!("Simulate damage and the full crash sequence.", "Simule les dégâts et la séquence complète de l’accident."),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        use crate::i18n::t;
+        match self {
+            Self::Recover => t!("Recover", "Récupération"),
+            Self::EndFlight => t!("End flight", "Fin du vol"),
+            Self::Detailed => t!("Detailed damage", "Dégâts détaillés"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     /// None: follow the system's language
@@ -24,6 +66,7 @@ pub struct Settings {
     pub runway_assist: bool,
     /// arcade mode: the game's fun features (missiles, boost, respawn at will, weather keys)
     pub arcade: bool,
+    pub collision_mode: CollisionMode,
     pub minimap_plan: bool,
     pub minimap_heading_up: bool,
     pub minimap_zoom: u8,
@@ -72,7 +115,7 @@ impl LastStart {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, hud_cockpit: false, minimap: true, landing_guidance: true, runway_assist: true, arcade: false, minimap_plan: false, minimap_heading_up: false, minimap_zoom: 12, minimap_size: 280.0, minimap_height: 280.0, taa: true, live_traffic: true, live_weather: true, real_time: true, last: None }
+        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, hud_cockpit: false, minimap: true, landing_guidance: true, runway_assist: true, arcade: false, collision_mode: CollisionMode::default(), minimap_plan: false, minimap_heading_up: false, minimap_zoom: 12, minimap_size: 280.0, minimap_height: 280.0, taa: true, live_traffic: true, live_weather: true, real_time: true, last: None }
     }
 }
 
@@ -107,6 +150,7 @@ impl Settings {
             landing_guidance: b("landing_guidance", d.landing_guidance),
             runway_assist: b("runway_assist", d.runway_assist),
             arcade: b("arcade", d.arcade),
+            collision_mode: j["collision_mode"].as_str().and_then(CollisionMode::parse).unwrap_or_default(),
             minimap_plan: b("minimap_plan", d.minimap_plan),
             minimap_heading_up: b("minimap_heading_up", d.minimap_heading_up),
             minimap_size: f("minimap_size", d.minimap_size as f64).clamp(240.0, 640.0) as f32,
@@ -134,6 +178,7 @@ impl Settings {
             "landing_guidance": self.landing_guidance,
             "runway_assist": self.runway_assist,
             "arcade": self.arcade,
+            "collision_mode": self.collision_mode.key(),
             "minimap_plan": self.minimap_plan,
             "minimap_heading_up": self.minimap_heading_up,
             "minimap_zoom": self.minimap_zoom,
@@ -166,7 +211,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, hud_cockpit: true, minimap: false, landing_guidance: false, runway_assist: false, arcade: true, minimap_plan: true, minimap_heading_up: true, minimap_zoom: 15, minimap_size: 420.0, minimap_height: 300.0, taa: false, live_traffic: false, live_weather: false, real_time: false, last: Some(LastStart { lat: 37.6, lon: -122.4, name: "KSFO".into(), airport: Some("KSFO".into()), start: "approach".into(), runway: Some("28L".into()), aircraft: "c172".into() }) };
+        let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, hud_cockpit: true, minimap: false, landing_guidance: false, runway_assist: false, arcade: true, collision_mode: CollisionMode::EndFlight, minimap_plan: true, minimap_heading_up: true, minimap_zoom: 15, minimap_size: 420.0, minimap_height: 300.0, taa: false, live_traffic: false, live_weather: false, real_time: false, last: Some(LastStart { lat: 37.6, lon: -122.4, name: "KSFO".into(), airport: Some("KSFO".into()), start: "approach".into(), runway: Some("28L".into()), aircraft: "c172".into() }) };
         assert_eq!(Settings::from_json(&s.to_json()), s);
         assert_eq!(Settings::from_json(&serde_json::json!({"last_start": {"lat": 300.0, "lon": 0.0}})).last, None);
         let legacy = Settings::from_json(&serde_json::json!({"minimap_size": 420}));

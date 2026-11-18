@@ -64,11 +64,14 @@ Remove the following FableFlight folders to delete downloaded maps and materials
 
 F12 screenshots go to the working directory. Remove screenshots, recordings and exports saved to paths you chose separately. If you used the JSBSim comparison commands, the system temporary directory may also contain `fablegame-jsbsim-compare`.
 
+## Collisions and reset
+
+Press **R** during any flight to reset the aircraft in the air near your current location. Under **Settings → General → Flight rules → Collisions**, **Recover** is the default and puts the aircraft back into stable flight after a severe impact. **End flight** shows an immediate flight-ended screen with options to restart nearby or return to the planner. **Detailed damage** uses the full crash simulation. To try one setting for a single run, pass `--collision recover`, `--collision end-flight`, or `--collision detailed`.
+
 # Arcade mode
 FableFlight is a simulator first: by default, the aircraft fly as they really do. **Arcade mode** (Settings › General, or `--arcade` for one run) turns on the game's fun features:
 - the F/A-18's Sidewinders (master arm, lock and fire on keys 3, 4 and 5);
 - boost on aircraft that have none in reality: the piston singles and the 747. Real afterburners and reheat (F/A-18, F-4, F-22, SR-71, Concorde) work in both modes;
-- respawning in flight at any time with R. In simulation mode R only works after a crash;
 - the weather and time keys in flight: T/Y for the time, N/M for the clouds. The weather panel and Go to work in both modes.
 
 # Language
@@ -77,6 +80,8 @@ The interface is in English or French. It follows the system language, can be ch
 # Joysticks, pedals and key bindings
 
 **Q / E** steer the nose wheel on the ground and move the rudder in flight. Hold **left / right Option** on Mac, or **left / right Alt** on other keyboards, for the corresponding toe brake. **B** applies both brakes. **Settings → Controls → Ground handling** has a runway steering assist. It is on by default for runway departures and helps hold the centreline during the takeoff roll. Steering and brake input take priority.
+
+**Tab** opens the in-flight toolbar. Choose a section to open its side panel. Press **Tab** again to close both. In stable airborne flight, **Menu Hold** maintains heading and altitude while the toolbar is open, and holds airspeed if there is no external throttle input. Firm flight-control input cancels the hold for that session. An autopilot you engaged yourself keeps its selected modes.
 
 The flight HUD shows fuel remaining, angle of attack (AOA) and vertical speed (ft/min). It uses a compact alert panel for terrain, unusual attitudes and other warnings. Press **H** to toggle the HUD in the current view.
 

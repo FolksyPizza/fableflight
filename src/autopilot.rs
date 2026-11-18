@@ -144,6 +144,28 @@ const VS_ALT: f64 = 7.5;
 const GS_DEG: f64 = 3.0;
 
 impl Autopilot {
+    /// A separate, temporary hold for the pilot while using the flight tools.
+    pub fn for_flight_tools(plane: &Plane) -> Option<Self> {
+        if plane.on_ground || plane.hold || plane.stalled || plane.spec.rocket().is_some()
+            || plane.up().dot(plane.pos.normalize()) <= 0.0
+        {
+            return None;
+        }
+        let state = State::of(plane);
+        if state.ias < plane.spec.approach.0 * 0.9
+            || state.bank.abs() > 35f64.to_radians()
+            || state.pitch.abs() > 20f64.to_radians()
+        {
+            return None;
+        }
+        let mut hold = Self {
+            lat: Lat::Hdg, vert: Vert::Alt, hdg: state.hdg, alt: state.alt,
+            spd: state.ias, at: plane.running, ..Self::default()
+        };
+        hold.engage(&state);
+        Some(hold)
+    }
+
     /// Engages it in ROL and PIT (or keeps the modes chosen beforehand),
     /// taking up the heading, altitude and speed of the moment where unset.
     pub fn engage(&mut self, s: &State) {
@@ -446,6 +468,27 @@ mod tests {
         ap.set_lat(Lat::Hdg, &s);
         ap.set_vert(Vert::Alt, &s);
         (p, ap)
+    }
+
+    #[test]
+    fn flight_tools_hold_captures_stable_flight_and_yields_to_the_pilot() {
+        let spec = &aircraft::c172::SPEC;
+        let (mut plane, _) = cruising(spec, 1500.0);
+        let state = State::of(&plane);
+        let mut hold = Autopilot::for_flight_tools(&plane).expect("stable flight");
+        assert_eq!(hold.lat, Lat::Hdg);
+        assert_eq!(hold.vert, Vert::Alt);
+        assert_eq!((hold.hdg, hold.alt, hold.spd), (state.hdg, state.alt, state.ias));
+        fly(&mut plane, &mut hold, &flat(), 20.0, None, 0.0, |_, _, _| false).unwrap();
+        let actual = State::of(&plane);
+        assert!((actual.alt - state.alt).abs() < 25.0);
+        assert!((actual.hdg - state.hdg).abs() < 4.0);
+        assert!(matches!(hold.step(&actual, &plane, None, (0.75, 0.0), 0.01), Err(Off::Pilot)));
+        plane.rot *= glam::DQuat::from_rotation_z(std::f64::consts::PI);
+        assert!(Autopilot::for_flight_tools(&plane).is_none());
+        plane.rot *= glam::DQuat::from_rotation_z(std::f64::consts::PI);
+        plane.on_ground = true;
+        assert!(Autopilot::for_flight_tools(&plane).is_none());
     }
 
     #[test]

@@ -451,8 +451,15 @@ impl Game {
                 menu::switch(ui, &mut self.minimap.landing_guidance);
             });
         });
-        card(ui, t!("Mode", "Mode"), |ui| {
-            row(ui, t!("Arcade mode", "Mode arcade"), t!("missiles, boost on any aircraft, respawn at will, weather and time keys", "missiles, boost sur tous les avions, réapparition à volonté, touches météo et heure"), |ui| {
+        card(ui, t!("Flight rules", "Règles de vol"), |ui| {
+            row(ui, t!("Collisions", "Collisions"), self.collision_mode.description(), |ui| {
+                egui::ComboBox::from_id_salt("collision_mode").selected_text(self.collision_mode.label()).show_ui(ui, |ui| {
+                    for mode in crate::settings::CollisionMode::ALL {
+                        ui.selectable_value(&mut self.collision_mode, mode, mode.label()).on_hover_text(mode.description());
+                    }
+                });
+            });
+            row(ui, t!("Arcade mode", "Mode arcade"), t!("missiles, boost on any aircraft, weather and time keys", "missiles, boost sur tous les avions, touches météo et heure"), |ui| {
                 menu::switch(ui, &mut self.arcade);
             });
         });
@@ -464,7 +471,7 @@ impl Game {
                 }
             });
         });
-        let t = if padui::active() { t!("In flight, View switches the camera; Y + View opens the flight panel.", "En vol, View change de caméra ; Y + View ouvre le panneau de vol.") } else { t!("Shortcuts in flight: U sound, C camera, H HUD, ` minimap, F2 anti-aliasing, Tab the flight panel.", "Raccourcis en vol : U son, C caméra, H HUD, ` mini-carte, F2 anticrénelage, Tab le panneau de vol.") };
+        let t = if padui::active() { t!("In flight, View switches the camera; Y + View opens the flight toolbar.", "En vol, View change de caméra ; Y + View ouvre la barre de vol.") } else { t!("Shortcuts in flight: U sound, C camera, H HUD, ` minimap, F2 anti-aliasing, Tab flight tools.", "Raccourcis en vol : U son, C caméra, H HUD, ` mini-carte, F2 anticrénelage, Tab les outils de vol.") };
         note(ui, t);
     }
 
@@ -531,7 +538,7 @@ impl Game {
         }
         ui.add_space(14.0);
         card(ui, t!("Key reference", "Aide-mémoire des touches"), |ui| {
-            let t = if padui::active() { t!("In flight, Y + View shows the flight panel (instruments, places, weather) and Menu pauses.", "En vol, Y + View affiche le panneau de vol (instruments, destinations, météo) et Menu met en pause.") } else { t!("In flight, Tab shows the flight panel (instruments, places, weather) and Esc pauses.", "En vol, Tab affiche le panneau de vol (instruments, destinations, météo) et Échap met en pause.") };
+            let t = if padui::active() { t!("In flight, Y + View shows the flight panel (instruments, places, weather) and Menu pauses.", "En vol, Y + View affiche le panneau de vol (instruments, destinations, météo) et Menu met en pause.") } else { t!("In flight, Tab opens the flight toolbar. Choose a section to open its panel. Esc pauses.", "En vol, Tab ouvre la barre de vol. Sélectionnez une rubrique pour afficher son panneau. Échap met en pause.") };
             note(ui, t);
             ui.add_space(6.0);
             menu::controls_list(ui);
