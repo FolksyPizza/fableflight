@@ -1170,6 +1170,17 @@ fn globe_pixel(id: TileId, u: f64, v: f64) -> [u8; 3] {
     img.get_pixel((x.rem_euclid(1.0) * img.width() as f64) as u32, (y.clamp(0.0, 0.999_999) * img.height() as f64) as u32).0
 }
 
+/// A local satellite-map thumbnail when no imagery has been cached.
+pub fn offline_map_thumbnail(id: TileId) -> image::RgbaImage {
+    const SIZE: u32 = 64;
+    image::RgbaImage::from_fn(SIZE, SIZE, |x, y| {
+        let u = (f64::from(x) + 0.5) / f64::from(SIZE);
+        let v = (f64::from(y) + 0.5) / f64::from(SIZE);
+        let [r, g, b] = globe_pixel(id, u, v);
+        image::Rgba([r, g, b, 255])
+    })
+}
+
 /// Six-arc-minute samples of NOAA's ETOPO1 ice-surface model, stored as
 /// signed whole metres with a 32768 offset. Longitude wraps at the date line.
 pub fn fallback_height(lat: f64, lon: f64) -> f32 {

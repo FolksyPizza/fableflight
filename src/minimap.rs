@@ -335,11 +335,16 @@ impl Minimap {
     }
 
     pub fn show(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, heading: Option<f64>, info_open: bool, guide: Option<&crate::approach::Guide>, world: &crate::world::World) {
+        let screen = ctx.content_rect();
+        let side = (screen.width() - crate::HUD_W) * 0.5 - 26.0;
+        let reserved_width = if info_open { 426.0 } else { 44.0 };
+        let limit = side.min(screen.width() - reserved_width).min(screen.bottom() - self.bottom - 52.0 - self.top).min(640.0);
+        if limit < 74.0 {
+            return;
+        }
         self.frame += 1;
         self.poll(ctx, src.google.generation());
         if let Some(h) = heading { self.heading = h; }
-        let reserved_width = if info_open { 426.0 } else { 44.0 };
-        let limit = (ctx.content_rect().width() - reserved_width).min(ctx.content_rect().bottom() - self.bottom - 44.0 - self.top - 8.0).clamp(120.0, 640.0);
         let diameter = self.size.x.clamp(240.0, 640.0).min(limit);
         egui::Area::new(egui::Id::unique("minimap")).anchor(egui::Align2::LEFT_BOTTOM, [14.0, -self.bottom]).show(ctx, |ui| {
             ui.set_width(diameter);
@@ -414,7 +419,8 @@ impl Minimap {
                         let src = Arc::clone(src);
                         self.pending = Some((id, self.generation, rx));
                         std::thread::spawn(move || {
-                            let img = src.imagery(id).ok().map(|img| image::imageops::resize(&img, 256, 256, image::imageops::FilterType::Triangle));
+                            let img = src.imagery(id).ok().map(|img| image::imageops::resize(&img, 256, 256, image::imageops::FilterType::Triangle))
+                                .or_else(|| src.fetch.offline.then(|| crate::sources::offline_map_thumbnail(id)));
                             let _ = tx.send(img);
                         });
                     }
@@ -425,7 +431,7 @@ impl Minimap {
                     self.draw_runways(world, &painter, rect, lat, lon, cx, cy, n, angle);
                     if let Some(guide) = guide { guide.draw_map(&painter, rect, cx, cy, n, angle); }
                 }
-                if !supported || drawn == 0 {
+                if diameter >= 180.0 && (!supported || drawn == 0) {
                     painter.text(rect.center() + Vec2::new(0.0, 32.0), egui::Align2::CENTER_CENTER,
                         if !supported { crate::t!("Map unavailable near poles", "Carte indisponible aux pôles") }
                         else if if self.plan { self.map_pending.is_some() } else { self.pending.is_some() } { crate::t!("Loading map…", "Chargement…") }
@@ -462,9 +468,7 @@ impl Minimap {
                 let hot = resize.hovered() || resize.dragged();
                 painter.circle_filled(knob, 7.0, Color32::from_black_alpha(220));
                 painter.circle_stroke(knob, 7.0, Stroke::new(1.5, if hot { crate::menu::ACCENT } else { Color32::WHITE }));
-                // Controls sit under the disc, on one glass strip: the two views as
-                // segmented choices, then zoom and hide.
-                egui::Frame::new().fill(crate::menu::GLASS).stroke(Stroke::new(1.0, crate::menu::LINE)).corner_radius(crate::menu::R_PANEL).inner_margin(4.0).show(ui, |ui| {
+                let controls = |ui: &mut egui::Ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.horizontal(|ui| {
                         crate::menu::segments(ui, |ui| {
@@ -480,7 +484,12 @@ impl Minimap {
                         if b(ui, self.zoom < 17, "+").on_hover_text(crate::t!("Zoom in", "Zoomer")).clicked() { self.zoom += 1; }
                         if b(ui, true, "×").on_hover_text(crate::t!("Hide map (`)", "Masquer la carte (`)")).clicked() { self.visible = false; }
                     });
-                });
+                };
+                if side < 420.0 {
+                    ui.menu_button(crate::t!("Map", "Carte"), controls);
+                } else {
+                    egui::Frame::new().fill(crate::menu::GLASS).stroke(Stroke::new(1.0, crate::menu::LINE)).corner_radius(crate::menu::R_PANEL).inner_margin(4.0).show(ui, controls);
+                }
             });
         });
     }
