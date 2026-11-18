@@ -334,7 +334,7 @@ impl Minimap {
         }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, heading: Option<f64>, view_width: f32, guide: Option<&crate::approach::Guide>, world: &crate::world::World) {
+    pub fn show(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, heading: Option<f64>, view_width: f32, guide: Option<&crate::approach::Guide>, taxi: &[(f64, f64)], world: &crate::world::World) {
         let screen = ctx.content_rect();
         let side = (view_width - crate::HUD_W) * 0.5 - 26.0;
         let limit = side.min(screen.bottom() - self.bottom - 52.0 - self.top).min(640.0);
@@ -428,7 +428,17 @@ impl Minimap {
                     let map_drawn = self.draw_map(ctx, src, &painter, rect, cx, cy, n, angle);
                     if self.plan { drawn = map_drawn; }
                     self.draw_runways(world, &painter, rect, lat, lon, cx, cy, n, angle);
-                    if let Some(guide) = guide { guide.draw_map(&painter, rect, cx, cy, n, angle); }
+                    if taxi.len() > 1 {
+                        let points: Vec<_> = taxi.iter().map(|&(lat, lon)| {
+                            let x = geo::lon_to_merc_x(lon) * n;
+                            let y = geo::lat_to_merc_y(lat) * n;
+                            let offset = Vec2::new(((x - cx + n * 0.5).rem_euclid(n) - n * 0.5) as f32, (y - cy) as f32) * 256.0;
+                            rect.center() + rotate(offset, angle)
+                        }).collect();
+                        painter.add(egui::Shape::line(points, Stroke::new(2.5, Color32::from_rgb(124, 223, 255))));
+                    } else if let Some(guide) = guide {
+                        guide.draw_map(&painter, rect, cx, cy, n, angle);
+                    }
                 }
                 if diameter >= 180.0 && (!supported || drawn == 0) {
                     painter.text(rect.center() + Vec2::new(0.0, 32.0), egui::Align2::CENTER_CENTER,

@@ -129,6 +129,7 @@ pub const ACTIONS: &[Action] = &[
     act("master_arm", KeyCode::Digit3, "Master arm", "Armement maître"),
     act("target_lock", KeyCode::Digit4, "Lock / cycle target", "Verrouiller / changer de cible"),
     act("fire_missile", KeyCode::Digit5, "Fire missile", "Tirer un missile"),
+    act("recenter_view", KeyCode::Home, "Recenter view", "Recentrer la vue"),
     act("engine_auto", KeyCode::F4, "Start / stop the engine", "Démarrer / couper le moteur"),
     act("master", KeyCode::Insert, "Battery master switch", "Batterie (interrupteur général)"),
     act("ignition", KeyCode::KeyI, "Magnetos (jets: fuel controls)", "Magnétos (jets : robinets carburant)"),

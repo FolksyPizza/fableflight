@@ -23,6 +23,8 @@ mod globeclouds;
 mod hangar;
 mod hangar_ui;
 mod bind;
+mod preflight;
+mod flightplan;
 mod i18n;
 mod jsbsim;
 mod live;
@@ -858,6 +860,7 @@ struct Loading {
     descent: Option<Instant>,
     descent_time: f64,
     eye: DVec3,
+    handoff: Option<preflight::Stage>,
 }
 impl Loading {
     const MIN: f64 = 1.2;
@@ -866,7 +869,7 @@ impl Loading {
     const SCENERY_VIEWS: [f64; 8] = [0.0, 0.18, 0.30, 0.42, 0.53, 0.65, 0.78, 0.90];
 
     fn new(eye: DVec3) -> Self {
-        Self { t0: Instant::now(), quiet_since: None, descent: None, descent_time: 0.0, eye }
+        Self { t0: Instant::now(), quiet_since: None, descent: None, descent_time: 0.0, eye, handoff: None }
     }
 
     fn progress(self) -> Option<f64> {
@@ -1205,6 +1208,8 @@ struct Game {
     pad_fixed: Vec<[u8; 16]>,
     /// the autopilot (autopilot.rs), and when it last let go (its warning)
     ap: autopilot::Autopilot,
+    flight_plan: flightplan::FlightPlan,
+    taxi_route: Vec<(f64, f64)>,
     ap_off_t: f64,
     ap_script: Vec<(f64, String)>,
     /// gamepad input for the menus: key events for the next UI pass, a focus
@@ -1309,6 +1314,9 @@ struct Game {
     /// the loading screen, from the start screen into the air (see `Loading`)
     loading: Option<Loading>,
     departure_intro: Option<DepartureIntro>,
+    preflight: Option<preflight::Stage>,
+    preflight_step_since: f64,
+    preflight_cockpit: bool,
     menu_overlay: Vec<egui::epaint::ClippedShape>,
     departure_terrain: f32,
     flight_ui_since: f64,
@@ -1544,13 +1552,13 @@ impl Game {
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { prefs.cam_mode }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
             utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], gfx, gfx_applied: None, prev_plane: Mat4::IDENTITY, plane_box, lamps,
             frame: 0, fps: 60.0, fps_log: (args.fps_log, Instant::now(), 0, 0.0), paused: false, show_help: false, show_hud: !args.no_hud && prefs.show_hud, hud_cockpit: prefs.hud_cockpit, arcade: args.arcade || prefs.arcade, goto_open: false, goto_text: String::new(), goto_rx: None,
-            status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, stage_at: args.stage_at, engines: args.engines, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, pad_y: false, pad_y_combo: false, ap: autopilot::Autopilot::default(), ap_off_t: -100.0, ap_script: args.ap_script.clone(), cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
+            status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, stage_at: args.stage_at, engines: args.engines, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, pad_y: false, pad_y_combo: false, ap: autopilot::Autopilot::default(), flight_plan: Default::default(), taxi_route: Vec::new(), ap_off_t: -100.0, ap_script: args.ap_script.clone(), cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
             record: args.record.clone(), rec_audio: Vec::new(), rec_n: 0, rec_t0: Instant::now(), sound_on: prefs.sound_on, volume: prefs.volume, flight_tools_open: false, info_open: false, menu_hold: None, menu_hold_pending: false, info_page: menu::Page::Flight, pause_open: false, pause_page: menu::Page::Game, pause_at: args.pause_menu, settings_sec: args.settings.unwrap_or(settings_ui::Section::General), look_sens: prefs.look_sens, head: cockpit::Head::new(cy.to_radians(), cp), cockpit_fov: args.fov.unwrap_or(prefs.cockpit_fov).clamp(30.0, 90.0), head_live: false, warn: audio::Warn::default(), warn_t: [-10.0; 4],
             g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, quit: false,
             mode: if args.menu.unwrap_or(true) { Mode::Menu } else { Mode::Fly }, menu, menu_go: args.menu_go, heading: args.heading.to_radians(), destr: destruct::Destruction::new(secs.to_bits()),
             sheds: damage::Sheds::default(), fx_anchor: plane.pos, fx_shift: DVec3::ZERO, smoke_acc: 0.0, flash: Vec::new(), airport_note: (String::new(), -100.0), toolbar_t: -100.0, toolbar_hover_blocked: false, weapon_flash: None, kills: Vec::new(), damage_spec: args.damage.clone(), wreck_dirty: false, wreck_t: 0.0, wreck_seen: 0.0,
-            start_rx: None, loading: None, departure_intro: None, menu_overlay: Vec::new(), departure_terrain: 1.0, flight_ui_since: -100.0, scenery_cache: Default::default(), name_rx: None, last_click: -10.0, n_cars: 0, city_glow: 0.0, skyglow: Default::default(), gauges: gauges::Gauges::new(&plane, secs.to_bits()), glass, lightning, rain_field: storm::RainField::default(), cam_rain: 0.0, cam_hail: 0.0, storm_adapt: 0.0, plane, weapons,
+            start_rx: None, loading: None, departure_intro: None, preflight: None, preflight_step_since: -100.0, preflight_cockpit: false, menu_overlay: Vec::new(), departure_terrain: 1.0, flight_ui_since: -100.0, scenery_cache: Default::default(), name_rx: None, last_click: -10.0, n_cars: 0, city_glow: 0.0, skyglow: Default::default(), gauges: gauges::Gauges::new(&plane, secs.to_bits()), glass, lightning, rain_field: storm::RainField::default(), cam_rain: 0.0, cam_hail: 0.0, storm_adapt: 0.0, plane, weapons,
             airport_rx: None, hold_spot: None, runway_steering: None, runway_assist: prefs.runway_assist, keyboard_rudder: prefs.keyboard_rudder, keyboard_rudder_fine: prefs.keyboard_rudder_fine, remember_start: prefs.remember_start,
             prefs_lang: args.lang.or(prefs.lang),
             prefs_t: 0.0,
@@ -1603,7 +1611,7 @@ impl Game {
             if let Some((i, rw, appr)) = g.pending_airport.take() {
                 g.choose_airport(i);
                 g.menu.runway = rw;
-                g.menu.start = if appr { menu::Start::Approach } else { menu::Start::Runway };
+                g.menu.start = if appr { menu::Start::Approach } else { menu::Start::Parking };
             }
         }
         // Otherwise the globe opens on the last flight's start, ready to take off.
@@ -1645,6 +1653,7 @@ impl Game {
         self.menu.start = match l.start.as_str() {
             "approach" => menu::Start::Approach,
             "overhead" => menu::Start::Overhead,
+            "parking" => menu::Start::Parking,
             _ => menu::Start::Runway,
         };
         self.menu.look_at(l.lat, l.lon, 30_000.0);
@@ -1676,6 +1685,16 @@ impl Game {
             self.head.rear = false;
             self.cam_mode = (self.cam_mode + 1) % 2;
         }
+    }
+
+    fn recenter_view(&mut self) {
+        self.cancel_cockpit_input();
+        self.head.center_seat();
+        self.head.zoom = 1.0;
+        (self.cam_yaw, self.cam_pitch) = self.cam_home;
+        self.cam_dist = self.spec.cam_dist;
+        self.cam_dir = -self.plane.forward();
+        self.head_live = false;
     }
 
     fn set_aircraft(&mut self, spec: &'static aircraft::Spec) {
@@ -1922,8 +1941,11 @@ impl Game {
     fn respawn_at(&mut self, lat: f64, lon: f64, alt: f64, heading: f64, speed: f64) {
         self.cancel_cockpit_input();
         self.flight_ended = None;
+        self.preflight = None;
+        self.taxi_route.clear();
         self.set_flight_tools(false);
         self.ap.disengage();
+        self.flight_plan.follow = false;
         self.hold_spot = None;
         self.runway_steering = None;
         self.plane.parking_brake = false;
@@ -1997,17 +2019,22 @@ impl Game {
         }
     }
     fn finish_departure(&mut self) {
-        self.loading = None;
+        self.preflight = self.loading.take().and_then(|loading| loading.handoff);
+        self.preflight_cockpit = false;
+        if let Some(stage) = self.preflight {
+            log::info!("Departure awaiting pilot: {stage:?}");
+        }
+        self.keys.clear();
         self.flight_ui_since = self.real;
     }
 
-    fn prepare_departure(&mut self) {
+    fn prepare_departure(&mut self, handoff: Option<preflight::Stage>) {
         let height = self.departure_eye().length().max(self.plane.pos.length() + 3000.0);
         let eye = self.plane.pos.normalize() * height;
         if let Some(intro) = &mut self.departure_intro {
             intro.retarget(eye);
         }
-        self.loading = Some(Loading::new(eye));
+        self.loading = Some(Loading { handoff, ..Loading::new(eye) });
     }
 
     fn departure_eye(&self) -> DVec3 {
@@ -2103,7 +2130,7 @@ impl Game {
             // Nothing on the map to land on: overhead instead.
             self.respawn(a.lat.to_radians(), a.lon.to_radians(), a.elev as f64 + 450.0, self.heading);
             self.status = t!("{} {} (no runway layout on the map)", "{} {} (pas de plan des pistes sur la carte)", a.code(), a.name);
-            if from_planner { self.prepare_departure(); }
+            if from_planner { self.prepare_departure(Some(preflight::Stage::Airborne)); }
             return;
         };
         let want = runway.as_deref().map(airports::norm_ident);
@@ -2112,7 +2139,28 @@ impl Game {
         let r = &g.runways[ri];
         let (thr, dir) = r.end(e);
         let heading = (dir.x as f64).atan2(dir.y as f64);
-        if approach {
+        let parking = from_planner && self.menu.start == menu::Start::Parking && self.spec.rocket().is_none();
+        let mut handoff = approach.then_some(preflight::Stage::Airborne);
+        if parking {
+            if let Some((point, direction, stand)) = g.player_parking(ri, e, self.spec.span) {
+                let (lat, lon) = g.lla(point);
+                let heading = f64::from(direction.x).atan2(f64::from(direction.y));
+                self.respawn_ground(lat, lon, g.h(point).into(), heading, 0.0);
+                self.plane.cold_and_dark();
+                self.plane.parking_brake = true;
+                self.taxi_route = g.taxi_to_runway(point, ri, e);
+                let label = stand.filter(|name| !name.is_empty()).map_or_else(
+                    || t!("{} · Parking", "{} · Stationnement", a.code()),
+                    |name| t!("{} · Stand {}", "{} · Poste {}", a.code(), name),
+                );
+                self.status = t!("{label} · Departure runway {}", "{label} · Piste de départ {}", r.ident[e]);
+                handoff = Some(preflight::Stage::Walkaround(0));
+            } else {
+                self.respawn(a.lat.to_radians(), a.lon.to_radians(), f64::from(a.elev) + 650.0, heading);
+                self.status = t!("{} · No suitable parking available. Starting overhead.", "{} · Poste indisponible. Départ en vol.", a.code());
+                handoff = Some(preflight::Stage::Airborne);
+            }
+        } else if approach {
             let d = if r.len > 1500.0 { 7000.0 } else { 4500.0 };
             let p = thr - dir * d;
             let (lat, lon) = g.lla(p);
@@ -2139,14 +2187,14 @@ impl Game {
             }
             self.status = t!("{} {} · runway {} · {:.0} m × {:.0} m", "{} {} · piste {} · {:.0} m × {:.0} m", a.code(), a.name, r.ident[e], r.len, r.width);
         }
-        if from_planner { self.prepare_departure(); }
+        if from_planner { self.prepare_departure(handoff); }
     }
 
 
     /// The cockpit control under the mouse at (x, y) window pixels (an index
     /// into the loaded cockpit controls): in the cockpit view, flying, nothing open.
     fn hotspot_at(&self, x: f64, y: f64) -> Option<usize> {
-        if self.mode != Mode::Fly || self.cam_mode != 1 || self.pause_open || self.crashed || self.cockpit_controls.is_empty() {
+        if self.mode != Mode::Fly || self.preflight.is_some() || self.cam_mode != 1 || self.pause_open || self.crashed || self.cockpit_controls.is_empty() {
             return None;
         }
         let (vp, cam) = self.live_view?;
@@ -2530,7 +2578,7 @@ impl Game {
             roll: dz(pad.value(Axis::LeftStickX)),
             yaw: (trig(Button::RightTrigger2, Axis::RightZ) - trig(Button::LeftTrigger2, Axis::LeftZ)).clamp(-1.0, 1.0),
             // A and B work the flight panel while it is open.
-            throttle: if nav == Nav::Panel { 0.0 } else { ax_pad(pad.is_pressed(Button::South), pad.is_pressed(Button::East) && !modifier) },
+            throttle: if nav == Nav::Panel || self.preflight.is_some() { 0.0 } else { ax_pad(pad.is_pressed(Button::South), pad.is_pressed(Button::East) && !modifier) },
             brake: pad.is_pressed(Button::West),
             brake_left: 0.0,
             brake_right: 0.0,
@@ -2666,6 +2714,10 @@ impl Game {
         for (id, down) in self.binds.take_edges() {
             let Some(a) = bind::ACTIONS.iter().find(|a| a.id == id) else { continue };
             if down {
+                if self.preflight.is_some() || self.departing() {
+                    self.key(a.key);
+                    continue;
+                }
                 // (Esc on the globe would quit the game.)
                 if !(a.key == KeyCode::Escape && self.mode != Mode::Fly) {
                     self.key(a.key);
@@ -2784,6 +2836,7 @@ impl Game {
             return;
         }
         let s = autopilot::State::of(&self.plane);
+        self.update_flight_plan(&s);
         let r = {
             let nav = self.radios.nav.as_ref().map(|st| autopilot::Nav { st, reading: nav::nav_reading(st, self.radios.obs, self.plane.pos), obs: self.radios.obs });
             self.ap.step(&s, &self.plane, nav.as_ref(), (c.pitch, c.roll), dt)
@@ -2845,6 +2898,7 @@ impl Game {
     fn ap_disconnect(&mut self, why: Option<autopilot::Off>) {
         use autopilot::Off;
         self.ap.disengage();
+        self.flight_plan.follow = false;
         self.ap_off_t = self.real;
         log::info!("autopilot off: {why:?}");
         self.status = match why {
@@ -2889,6 +2943,7 @@ impl Game {
 
     /// A lateral mode button: picks it (and engages the autopilot), or, pressed again, back to HDG.
     fn ap_lat(&mut self, m: autopilot::Lat) {
+        self.flight_plan.follow = false;
         let s = autopilot::State::of(&self.plane);
         let m = if self.ap.on && self.ap.lat == m && m != autopilot::Lat::Hdg { autopilot::Lat::Hdg } else { m };
         // (Off, nothing set yet: the heading and altitude of the moment.)
@@ -3024,6 +3079,7 @@ impl Game {
             "F5 autopilot on/off · 7 HDG · 8 NAV · 9 APR (ILS) · 0 ALT · − / = heading bug · ; / ' altitude. NAV and APR follow NAV 1 (Radio page). A firm push on the controls disconnects it.",
             "F5 pilote automatique · 7 HDG · 8 NAV · 9 APR (ILS) · 0 ALT · − / = consigne de cap · ; / ' altitude. NAV et APR suivent la NAV 1 (page Radios). Une action franche sur les commandes le déconnecte."
         )).size(11.5).color(DIM));
+        self.flight_plan_ui(ui);
     }
 
     fn radio_page(&mut self, ui: &mut egui::Ui) {
@@ -3352,6 +3408,15 @@ impl Game {
     /// A gamepad button pressed, for whatever it works at the moment.
     fn pad_button(&mut self, nav: Nav, b: gilrs::Button, modifier: bool) {
         use gilrs::Button;
+        if self.preflight.is_some() {
+            match b {
+                Button::South | Button::Start => self.advance_preflight(),
+                Button::East => self.to_globe(),
+                _ => {}
+            }
+            return;
+        }
+        if self.departing() { return; }
         if self.flight_ended.is_some() {
             match b {
                 Button::South => self.respawn_here(),
@@ -3428,10 +3493,7 @@ impl Game {
             (_, Button::South) if self.crashed => self.respawn_here(),
             (_, Button::Select) if modifier => self.set_flight_tools(true),
             (_, Button::Select) => self.next_view(),
-            (_, Button::RightThumb) => {
-                (self.cam_yaw, self.cam_pitch) = self.cam_home;
-                self.head.zoom = 1.0;
-            }
+            (_, Button::RightThumb) => self.recenter_view(),
             (_, Button::East) if modifier => {
                 self.plane.parking_brake = !self.plane.parking_brake;
                 self.status = if self.plane.parking_brake { t!("Parking brake set", "Frein de parc serré") } else { t!("Parking brake released", "Frein de parc desserré") }.into();
@@ -3496,6 +3558,16 @@ impl Game {
     }
 
     fn key(&mut self, code: KeyCode) {
+        if self.preflight.is_some() {
+            match code {
+                KeyCode::Enter | KeyCode::NumpadEnter => self.advance_preflight(),
+                KeyCode::Escape => self.to_globe(),
+                KeyCode::KeyC if self.preflight == Some(preflight::Stage::Airborne) => self.toggle_briefing_view(),
+                KeyCode::Home => self.recenter_view(),
+                _ => {}
+            }
+            return;
+        }
         if self.departing() {
             if self.loading.is_some_and(|l| l.descent.is_some()) && matches!(code, KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space | KeyCode::Escape) {
                 self.finish_departure();
@@ -3552,6 +3624,7 @@ impl Game {
             KeyCode::Escape => self.set_pause_menu(true),
             KeyCode::KeyR => self.respawn_here(),
             KeyCode::KeyC => self.next_view(),
+            KeyCode::Home => self.recenter_view(),
             KeyCode::KeyF if !self.crashed => self.plane.set_flaps(1),
             KeyCode::KeyV if !self.crashed => self.plane.set_flaps(-1),
             KeyCode::KeyL if !self.crashed => self.plane.toggle_gear(),
@@ -3777,6 +3850,11 @@ impl Game {
         self.set_pause_menu(false);
         self.set_flight_tools(false);
         self.flight_ended = None;
+        self.preflight = None;
+        self.flight_plan = Default::default();
+        self.taxi_route.clear();
+        self.loading = None;
+        self.departure_intro = None;
         self.menu.reset_globe(self.utc);
         self.menu.search.clear();
         self.menu.pick = None;
@@ -3929,6 +4007,7 @@ impl Game {
             name: self.menu.pick_name.clone(),
             airport: self.menu.airport.map(|i| db.apts[i as usize].ident.clone()),
             start: match self.menu.start {
+                menu::Start::Parking => "parking",
                 menu::Start::Runway => "runway",
                 menu::Start::Approach => "approach",
                 menu::Start::Overhead => "overhead",
@@ -4525,7 +4604,9 @@ impl Game {
 
     fn frame(&mut self) {
         self.keep_settings(false);
-        self.random_failures();
+        if self.preflight.is_none() && !self.departing() {
+            self.random_failures();
+        }
         let now = Instant::now();
         let frame_secs = (now - self.last).as_secs_f64();
         let mut dt_real = frame_secs.min(0.05);
@@ -4600,7 +4681,7 @@ impl Game {
                 self.respawn(lat.to_radians(), lon.to_radians(), elev + self.menu.start_agl, self.heading);
                 self.status = self.menu.pick_name.clone();
                 self.status_until = self.real + 10.0;
-                self.prepare_departure();
+                self.prepare_departure(Some(preflight::Stage::Airborne));
                 self.mode = Mode::Fly;
                 self.menu.starting = false;
             }
@@ -4640,7 +4721,7 @@ impl Game {
         let in_menu = self.mode == Mode::Menu;
 
         if let Some((page, sec, t)) = self.pause_at {
-            if self.real >= t && self.mode == Mode::Fly && !self.departing() {
+            if self.real >= t && self.mode == Mode::Fly && !self.departing() && self.preflight.is_none() {
                 if page.is_info() {
                     self.set_flight_tools(true);
                     (self.info_open, self.info_page) = (true, page);
@@ -4660,7 +4741,7 @@ impl Game {
         let departing = self.departing();
         let map_view = in_menu && !departing;
         let loading = self.loading.is_some();
-        let scale = if self.paused || in_menu || self.pause_open || self.flight_ended.is_some() || self.real < self.hold || loading { 0.0 } else { 1.0 };
+        let scale = if self.paused || in_menu || self.pause_open || self.flight_ended.is_some() || self.real < self.hold || loading || self.preflight.is_some() { 0.0 } else { 1.0 };
         let dt = dt_real * scale;
         self.time += dt;
         if !in_menu {
@@ -5043,7 +5124,13 @@ impl Game {
         let (rw, rh) = { let (a, b) = self.r.render_size(); (a as f32, b as f32) };
         let mut fov = 60f32.to_radians();
         let (cam, dir, upv);
-        if !(self.cam_mode == 1 && !self.crashed && !in_menu) {
+        let staged = self.preflight.or(self.loading.and_then(|loading| loading.handoff));
+        let cockpit_view = match staged {
+            Some(preflight::Stage::Airborne) => self.preflight.is_some() && self.preflight_cockpit,
+            Some(preflight::Stage::Walkaround(_)) => false,
+            None => self.cam_mode == 1,
+        };
+        if !(cockpit_view && !self.crashed && !in_menu) {
             self.head_live = false;
         }
         if in_menu {
@@ -5165,7 +5252,12 @@ impl Game {
             cam = self.cam_pos;
             dir = (self.cam_look - cam).normalize();
             upv = u;
-        } else if self.cam_mode == 1 {
+        } else if let Some(preflight::Stage::Walkaround(step)) = staged {
+            let easing = Loading::ease((self.real - self.preflight_step_since) / 0.55);
+            (cam, dir, upv) = preflight::walkaround_camera(&self.plane, step, easing);
+            fov = 54f32.to_radians();
+            self.cam_pos = cam;
+        } else if cockpit_view {
             if !self.head_live {
                 self.head.reset(self.cam_yaw, self.cam_pitch);
                 self.head_live = true;
@@ -5221,7 +5313,7 @@ impl Game {
             let t = l.progress().unwrap_or(0.0);
             let ease = Loading::ease(t) as f32;
             fov = 60f32.to_radians() + (fov - 60f32.to_radians()) * ease;
-            l.camera(t, cam, dir, upv, self.cam_mode == 1)
+            l.camera(t, cam, dir, upv, cockpit_view)
         } else {
             (cam, dir, upv)
         };
@@ -5252,7 +5344,7 @@ impl Game {
         let scrape = if steps > 0 { (scrape_n as f32 / steps as f32 * 0.5).min(1.0) } else { 0.0 };
         self.update_audio(cam, fire, in_menu, &c, dt, scrape);
 
-        let flight_near = if self.cam_mode == 1 && !self.crashed { 0.03f32 } else { 0.25f32 };
+        let flight_near = if cockpit_view && !self.crashed { 0.03f32 } else { 0.25f32 };
         let near = if in_menu { (calt * 0.02).clamp(0.4, 20_000.0) as f32 } else if loading {
             flight_near.max(((calt - geo::pos_to_lla(flight_camera.0).2) * 0.002).max(0.0) as f32)
         } else { flight_near };
@@ -5288,7 +5380,7 @@ impl Game {
             let departure_views = self.loading.filter(|_| preparing).map(|l| {
                 let (eye, dir, up, final_fov) = flight_camera;
                 Loading::SCENERY_VIEWS.map(|t| {
-                    let (cam, direction, up) = l.camera(t, eye, dir, up, self.cam_mode == 1);
+                    let (cam, direction, up) = l.camera(t, eye, dir, up, cockpit_view);
                     let fov = 60f32.to_radians() + (final_fov - 60f32.to_radians()) * Loading::ease(t) as f32;
                     // Cover the views between the samples, plus a margin at the image edge.
                     let buffered_fov = (fov + 12f32.to_radians()).min(150f32.to_radians());
@@ -5361,7 +5453,7 @@ impl Game {
         // The start screen's globe from orbit is exposed for its day side
         // (common.wgsl `globe_k`), wherever the night falls on it.
         let globe = if map_view || self.departure_intro.is_some() { let k = ((calt as f32 - 150e3) / 650e3).clamp(0.0, 1.0); k * k * (3.0 - 2.0 * k) } else { 0.0 };
-        let exposure = (6.0f32.ln() + (GLOBE_EXPOSURE.ln() - 6.0f32.ln()) * globe + (0.5f32.ln() - 6.0f32.ln()) * day * (1.0 - globe)).exp() * if self.cam_mode == 1 && !self.crashed && !in_menu { 2f32.powf(self.head.adapt) } else { 1.0 } * 2f32.powf(1.3 * self.storm_adapt);
+        let exposure = (6.0f32.ln() + (GLOBE_EXPOSURE.ln() - 6.0f32.ln()) * globe + (0.5f32.ln() - 6.0f32.ln()) * day * (1.0 - globe)).exp() * if cockpit_view && !self.crashed && !in_menu { 2f32.powf(self.head.adapt) } else { 1.0 } * 2f32.powf(1.3 * self.storm_adapt);
         let v4 = |v: DVec3, w: f64| [v.x as f32, v.y as f32, v.z as f32, w as f32];
         let cam_right = dir.cross(upv).normalize();
         let cam_up = cam_right.cross(dir);
@@ -5478,7 +5570,7 @@ impl Game {
             let o = self.rain_field.off;
             let v = self.rain_field.rel;
             // Drops closer than this are inside the cockpit (or the camera's lens).
-            let near_cut = if self.cam_mode == 1 && !self.crashed { 2.5 } else { 0.3 };
+            let near_cut = if cockpit_view && !self.crashed { 2.5 } else { 0.3 };
             // (Hail rides along in the intensity's whole part, in sixteenths: precip.wgsl.)
             let rain_w = self.cam_rain.min(0.999) + (self.cam_hail.clamp(0.0, 1.0) * 15.0).round();
             g.rain = [[o.x as f32, o.y as f32, o.z as f32, rain_w], [v.x as f32, v.y as f32, v.z as f32, near_cut as f32]];
@@ -5707,7 +5799,7 @@ impl Game {
             let (la, lo, _) = geo::pos_to_lla(self.plane.pos);
             Some((la.to_degrees(), lo.to_degrees()))
         };
-        self.livewx.step(&self.src, &mut self.wx, wx_at, if in_menu { 0.0 } else { dt_real });
+        self.livewx.step(&self.src, &mut self.wx, wx_at, if in_menu || self.preflight.is_some() { 0.0 } else { dt_real });
         if let Some(px) = self.gclouds.step(&self.src, map_view) {
             self.r.upload_globe_clouds(&px);
         }
@@ -5718,7 +5810,10 @@ impl Game {
 
         // The globe's labels are placed in the window's pixels, not the (maybe smaller) 3D scene's.
         let (ww, wh) = (self.r.config.width as f32, self.r.config.height as f32);
-        let landing_guide = if !in_menu && !departing { self.landing_guide() } else { None };
+        if let Some(preflight::Stage::Walkaround(step)) = staged {
+            preflight::equipment(&self.plane, cam, step, &mut insts);
+        }
+        let landing_guide = if !in_menu && !departing && self.preflight.is_none() { self.landing_guide() } else { None };
         let approach_lines = if self.hud_on() && !self.pause_open && !self.plane.on_ground {
             landing_guide.as_ref().map_or_else(Vec::new, |guide| guide.world_lines(cam, self.plane.pos, self.plane.forward()))
         } else {
@@ -5726,6 +5821,8 @@ impl Game {
         };
         let ui = if departing {
             self.departure_ui()
+        } else if let Some(stage) = self.preflight {
+            self.preflight_ui(stage)
         } else if in_menu {
             self.menu_ui(vp, cam, ww, wh)
         } else {
@@ -6064,6 +6161,7 @@ impl Game {
                                 Some(i) => {
                                     let a = &db.apts[i as usize];
                                     menu::segments(ui, |ui| {
+                                        menu::seg(ui, &mut self.menu.start, menu::Start::Parking, t!("Parking", "Poste"));
                                         menu::seg(ui, &mut self.menu.start, menu::Start::Runway, t!("Runway", "Piste"));
                                         menu::seg(ui, &mut self.menu.start, menu::Start::Approach, t!("Final", "Finale"));
                                         menu::seg(ui, &mut self.menu.start, menu::Start::Overhead, t!("Overhead", "Au-dessus"));
@@ -6115,7 +6213,11 @@ impl Game {
                         let ground = self.menu.airport.is_some() && self.menu.start != menu::Start::Overhead;
                         // (the aircraft is named on its card just above)
                         let how = if ground {
-                            let first = if self.menu.start == menu::Start::Runway { t!("Runway", "Piste") } else { t!("Final", "Finale") };
+                            let first = match self.menu.start {
+                                menu::Start::Parking => t!("Taxi to runway", "Roulage vers piste"),
+                                menu::Start::Approach => t!("Final", "Finale"),
+                                _ => t!("Runway", "Piste"),
+                            };
                             match &self.menu.runway {
                                 Some(rw) => format!("{first} {rw}"),
                                 None => t!("{}, into the wind", "{}, face au vent", first),
@@ -6146,6 +6248,8 @@ impl Game {
                             let summary = if let Some(i) = self.menu.airport {
                                 let code = airports::Db::get().apts[i as usize].code();
                                 let start = match (self.menu.start, self.menu.runway.as_deref()) {
+                                    (menu::Start::Parking, Some(runway)) => t!("Taxi to runway {}", "Roulage vers piste {}", runway),
+                                    (menu::Start::Parking, None) => t!("Parking start", "Départ au poste").to_string(),
                                     (menu::Start::Overhead, _) => t!("Overhead", "Au-dessus").to_string(),
                                     (menu::Start::Approach, Some(runway)) => t!("Final {}", "Finale {}", runway),
                                     (menu::Start::Runway, Some(runway)) => t!("Runway {}", "Piste {}", runway),
@@ -6193,13 +6297,21 @@ impl Game {
                         ui.spacing_mut().slider_width = 116.0;
                         let ground = self.menu.airport.is_some() && self.menu.start != menu::Start::Overhead;
                         let flight = if ground {
-                            (if self.menu.start == menu::Start::Runway { t!("On the runway", "Sur la piste") } else { t!("Final approach", "Approche finale") }).to_string()
+                            match self.menu.start {
+                                menu::Start::Parking => t!("Cold at parking", "Arrêté au poste"),
+                                menu::Start::Runway => t!("On the runway", "Sur la piste"),
+                                _ => t!("Final approach", "Approche finale"),
+                            }.to_string()
                         } else {
                             format!("{:.0} ft · {:03.0}°", (self.menu.start_agl * 3.28084 / 50.0).round() * 50.0, self.heading.to_degrees().rem_euclid(360.0))
                         };
                         menu::section(ui, "flight", t!("Flight", "Vol"), &flight, false, |ui| {
                             if ground {
-                                ui.label(RichText::new(if self.menu.start == menu::Start::Runway { t!("Starting on the runway, ready for take-off.", "Départ sur la piste, prêt au décollage.") } else { t!("Starting on a 3° final approach, gear and flaps down.", "Départ en approche finale à 3°, train et volets sortis.") }).font(menu::caption()).color(DIM));
+                                ui.label(RichText::new(match self.menu.start {
+                                    menu::Start::Parking => t!("Walk around, board, start the engine and taxi to the selected runway.", "Inspection, embarquement, démarrage et roulage vers la piste choisie."),
+                                    menu::Start::Runway => t!("Start on the runway ready for takeoff.", "Départ sur la piste, prêt au décollage."),
+                                    _ => t!("Start on a 3° final with gear and flaps down.", "Départ en finale à 3°, train et volets sortis."),
+                                }).font(menu::caption()).color(DIM));
                             } else {
                                 ui.label(RichText::new(t!("Starting in the air:", "Départ en vol :")).font(menu::caption()).color(DIM));
                             }
@@ -7474,7 +7586,8 @@ impl Game {
                 if self.minimap.visible {
                     let horizontal = f.dot(e).hypot(f.dot(n));
                     let width = self.flight_view_width(ctx);
-                    self.minimap.show(ctx, &self.src, lat, lon, (horizontal > 1e-5).then_some(hdg.to_radians()), width, landing_guide, &self.world);
+                    let taxi: &[(f64, f64)] = if self.plane.on_ground { &self.taxi_route } else { &[] };
+                    self.minimap.show(ctx, &self.src, lat, lon, (horizontal > 1e-5).then_some(hdg.to_radians()), width, landing_guide, taxi, &self.world);
                 }
             }
             if self.show_help {
@@ -7656,6 +7769,9 @@ impl ApplicationHandler for App {
         }
         let Some(g) = self.game.as_mut().filter(|g| g.window.id() == id) else { return };
         let consumed = g.egui_state.on_window_event(&g.window, &event).consumed;
+        if g.preflight.is_some() && matches!(event, WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } | WindowEvent::CursorMoved { .. }) {
+            return;
+        }
         if g.departing() && matches!(event, WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } | WindowEvent::CursorMoved { .. }) {
             return;
         }
@@ -7739,9 +7855,13 @@ impl ApplicationHandler for App {
                             }
                         } else if !(consumed || g.goto_open) {
                             if !k.repeat {
+                                let staged = g.preflight.is_some() || g.departing();
                                 g.key(code);
+                                if staged { return; }
                             }
-                            g.keys.insert(code);
+                            if g.preflight.is_none() && !g.departing() {
+                                g.keys.insert(code);
+                            }
                         }
                     } else {
                         g.keys.remove(&code);

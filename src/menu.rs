@@ -204,6 +204,8 @@ pub fn day_side_lon(utc: f64) -> f64 {
 /// How to start at an airport chosen on the globe.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Start {
+    /// Cold aircraft on a stand or at an off-runway parking point.
+    Parking,
     /// at rest on the runway, lined up for take-off
     Runway,
     /// on a 3° final approach to it
@@ -216,7 +218,7 @@ impl Menu {
     const ORBIT_ALT: f64 = 11_000_000.0;
 
     pub fn new(lat: f64, lon: f64, hour: f64) -> Self {
-        Self { lat, lon, alt: 15_000_000.0, target_alt: Self::ORBIT_ALT, focus: None, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, screen: Screen::Main, air_back: Screen::Main, air_view: 0, spin: 1.0, airport: None, start: Start::Runway, runway: None, start_agl: 450.0, markers: Vec::new(), aircraft: 0, air_tab: crate::hangar_ui::Tab::Mine, hangar_sel: None, hangar_find: String::new(), hangar_all: false, fuel: 0.5, cold: false, payload: None }
+        Self { lat, lon, alt: 15_000_000.0, target_alt: Self::ORBIT_ALT, focus: None, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, screen: Screen::Main, air_back: Screen::Main, air_view: 0, spin: 1.0, airport: None, start: Start::Parking, runway: None, start_agl: 450.0, markers: Vec::new(), aircraft: 0, air_tab: crate::hangar_ui::Tab::Mine, hangar_sel: None, hangar_find: String::new(), hangar_all: false, fuel: 0.5, cold: false, payload: None }
     }
 
     pub fn look_at(&mut self, lat: f64, lon: f64, alt: f64) {

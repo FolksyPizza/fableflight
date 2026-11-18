@@ -1602,6 +1602,17 @@ mod fallback_tests {
     }
 
     #[test]
+    fn offline_parking_is_outside_the_runway_protected_strip() {
+        let cache = std::env::temp_dir().join(format!("fableflight-parking-{}", std::process::id()));
+        let src = Sources::new(Fetcher::new(cache, true), String::new());
+        let airport = crate::airports::Db::get().find("KOSH").unwrap();
+        let field = crate::airports::geo_for(&src, airport).unwrap();
+        let (point, facing, _) = field.player_parking(0, 0, 11.0).expect("land beside the runway");
+        assert!(field.on_runway(point, 15.0).is_none());
+        assert!(facing.is_normalized());
+    }
+
+    #[test]
     fn offline_runway_stays_above_the_bay() {
         let cache = std::env::temp_dir().join(format!("fableflight-offline-{}", std::process::id()));
         let src = Sources::new(Fetcher::new(cache, true), String::new());

@@ -501,6 +501,75 @@ impl Geo {
         let v = w * s - self.origin;
         Vec2::new(v.dot(self.e) as f32, v.dot(self.n) as f32)
     }
+    /// Prefer marked parking. Without mapped stands, use an off-runway
+    /// apron or a reasonably flat spot on verified land near the runway.
+    pub fn player_parking(&self, runway: usize, end: usize, wingspan: f32) -> Option<(Vec2, Vec2, Option<&str>)> {
+        let runway = &self.runways[runway];
+        let (threshold, direction) = runway.end(end);
+        let clearance = wingspan.mul_add(0.55, 9.0);
+        let clear = |p| self.on_runway(p, clearance).is_none();
+        let size = [14.0, 24.0, 35.0, 48.0].into_iter().filter(|&limit| wingspan > limit).count() as u8;
+        if let Some(stand) = self.stands.iter().filter(|s| !s.terminal && s.size >= size && clear(s.pos))
+            .min_by(|a, b| a.pos.distance_squared(threshold).total_cmp(&b.pos.distance_squared(threshold)))
+        {
+            return Some((stand.pos, stand.dir, Some(&stand.gate)));
+        }
+
+        let side = right_of(direction);
+        let footprint = [Vec2::ZERO, side * clearance, -side * clearance, direction * clearance, -direction * clearance];
+        for apron in &self.aprons {
+            let p = apron[0].iter().copied().sum::<Vec2>() / apron[0].len() as f32;
+            if clear(p) && footprint.iter().all(|o| in_poly(p + *o, apron)) {
+                return Some((p, (threshold - p).normalize(), None));
+            }
+        }
+
+        for offset in [0.16, 0.30, 0.50, 0.72] {
+            let mid = threshold + direction * (runway.len * offset);
+            for distance in [70.0, 110.0, 165.0] {
+                for sign in [-1.0, 1.0] {
+                    let p = mid + side * sign * (runway.width * 0.5 + clearance + distance);
+                    if !clear(p) { continue; }
+                    let (lat, lon) = self.lla(p);
+                    let center = crate::sources::fallback_height(lat, lon);
+                    let dry_ground = footprint.iter().all(|o| {
+                        let (lat, lon) = self.lla(p + *o);
+                        let terrain = crate::sources::fallback_height(lat, lon);
+                        terrain > 0.5 && (terrain - center).abs() < 3.0
+                    });
+                    if dry_ground {
+                        return Some((p, (threshold - p).normalize(), None));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Plan from the parking position to the selected runway's nearest hold.
+    pub fn taxi_to_runway(&self, start: Vec2, runway: usize, end: usize) -> Vec<(f64, f64)> {
+        let threshold = self.runways[runway].end(end).0;
+        let Some(hold) = self.holds.iter().filter(|h| usize::from(h.rwy) == runway)
+            .min_by(|a, b| a.p.distance_squared(threshold).total_cmp(&b.p.distance_squared(threshold)))
+        else {
+            return Vec::new();
+        };
+        let Some((from, to)) = self.graph.nearest(start, true).zip(self.graph.nearest(hold.p, true)) else {
+            return Vec::new();
+        };
+        let Some(nodes) = self.graph.path(from, to) else { return Vec::new() };
+        // Direct links beyond the mapped network are kept local to the stand and hold.
+        if self.graph.nodes[from as usize].p.distance(start) > 180.0
+            || self.graph.nodes[to as usize].p.distance(hold.p) > 95.0
+        {
+            return Vec::new();
+        }
+        std::iter::once(start)
+            .chain(nodes.into_iter().map(|i| self.graph.nodes[i as usize].p))
+            .chain(std::iter::once(hold.p))
+            .map(|p| self.lla(p)).collect()
+    }
+
     /// Latitude and longitude (radians) of a local point.
     pub fn lla(&self, p: Vec2) -> (f64, f64) {
         let (lat, lon, _) = geo::pos_to_lla(self.world(p, 0.0));
