@@ -1162,12 +1162,31 @@ pub fn globe_image() -> &'static image::RgbImage {
     IMAGE.get_or_init(|| image::load_from_memory(include_bytes!("../assets/ui/blue-marble.jpg")).expect("bundled Blue Marble JPEG").into_rgb8())
 }
 
-fn globe_pixel(id: TileId, u: f64, v: f64) -> [u8; 3] {
-    let img = globe_image();
+fn globe_uv(id: TileId, u: f64, v: f64) -> (f64, f64) {
     let (lat, _) = id.lat_lon(u, v);
-    let x = (id.x as f64 + u) / (1u32 << id.z) as f64;
-    let y = 0.5 - lat / std::f64::consts::PI;
-    img.get_pixel((x.rem_euclid(1.0) * img.width() as f64) as u32, (y.clamp(0.0, 0.999_999) * img.height() as f64) as u32).0
+    ((id.x as f64 + u) / (1u32 << id.z) as f64, 0.5 - lat / std::f64::consts::PI)
+}
+
+fn sample_globe(img: &image::RgbImage, u: f64, v: f64) -> [u8; 3] {
+    let (width, height) = (i64::from(img.width()), i64::from(img.height()));
+    let x = (u.rem_euclid(1.0) * width as f64 - 0.5) as f32;
+    let y = (v.clamp(0.0, 1.0) * height as f64 - 0.5) as f32;
+    let (i, j) = (x.floor() as i64, y.floor() as i64);
+    let (fx, fy) = (x - i as f32, y - j as f32);
+    let pixel = |x: i64, y: i64| {
+        img.get_pixel(x.rem_euclid(width) as u32, y.clamp(0, height - 1) as u32).0
+    };
+    let [a, b, c, d] = [pixel(i, j), pixel(i + 1, j), pixel(i, j + 1), pixel(i + 1, j + 1)];
+    std::array::from_fn(|k| {
+        let north = f32::from(a[k]) * (1.0 - fx) + f32::from(b[k]) * fx;
+        let south = f32::from(c[k]) * (1.0 - fx) + f32::from(d[k]) * fx;
+        (north * (1.0 - fy) + south * fy).round() as u8
+    })
+}
+
+fn globe_pixel(id: TileId, u: f64, v: f64) -> [u8; 3] {
+    let (x, y) = globe_uv(id, u, v);
+    sample_globe(globe_image(), x, y)
 }
 
 /// A local satellite-map thumbnail when no imagery has been cached.
@@ -1314,8 +1333,13 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
                     for x in 0..MASK {
                         let (u, v) = ((x as f64 + 0.5) / MASK as f64, (y as f64 + 0.5) / MASK as f64);
                         let sea = elev.as_ref().map_or_else(|| {
-                            // Blue Marble marks open water with a near-constant navy.
-                            let [r, g, b] = globe_pixel(id, u, v);
+                            // Water classification uses the original sample, without
+                            // introducing blended land colors at the coastline.
+                            let img = globe_image();
+                            let (gx, gy) = globe_uv(id, u, v);
+                            let x = (gx.rem_euclid(1.0) * img.width() as f64) as u32;
+                            let y = ((gy * img.height() as f64) as u32).min(img.height() - 1);
+                            let [r, g, b] = img.get_pixel(x, y).0;
                             r < 9 && g < 12 && (15..=25).contains(&b)
                         }, |e| e.sample(ox + u * sc, oy + v * sc) < -1.0);
                         if sea {
@@ -1551,6 +1575,14 @@ mod night_lights_tests {
 #[cfg(test)]
 mod fallback_tests {
     use super::*;
+
+    #[test]
+    fn offline_globe_filter_smooths_pixels_and_wraps_the_dateline() {
+        let atlas = image::RgbImage::from_fn(2, 2, |x, y| image::Rgb([(x * 100) as u8, (y * 60) as u8, 30]));
+        assert_eq!(sample_globe(&atlas, 0.5, 0.5), [50, 30, 30]);
+        assert_eq!(sample_globe(&atlas, 0.0, 0.0), [50, 0, 30]);
+        assert_eq!(sample_globe(&atlas, 0.0, 1.0), sample_globe(&atlas, 1.0, 1.0));
+    }
 
     #[test]
     fn cold_offline_tiles_cover_land_and_ocean() {

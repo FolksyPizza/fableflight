@@ -6796,7 +6796,7 @@ impl Game {
         if self.crashed {
             return None;
         }
-        let f = self.world.airfield_near(self.plane.pos, 18_000.0)?;
+        let (f, _) = self.approach_airfield()?;
         let g = &f.geo;
         let a = g.apt();
         let mut out = vec![(format!("{}  {}", a.code(), a.name), 0u8)];
@@ -6850,16 +6850,33 @@ impl Game {
         Some(out)
     }
 
+    fn approach_airfield(&self) -> Option<(&world::Field, Option<&str>)> {
+        let reachable = |id| self.world.airfield(id).filter(|field| {
+            self.plane.pos.distance(field.geo.center) < 18_000.0 + f64::from(field.geo.radius)
+        });
+        if let Some(ils) = self.radios.nav.as_ref().filter(|nav| nav.kind == nav::Kind::Ils)
+            && let Some(field) = airports::Db::get().find(&ils.name).and_then(reachable)
+        {
+            return Some((field, Some(&ils.ident)));
+        }
+        if let Some(field) = self.menu.airport.and_then(reachable) {
+            return Some((field, self.menu.runway.as_deref()));
+        }
+        self.world.airfield_near(self.plane.pos, 18_000.0).map(|field| (field, None))
+    }
+
     fn landing_guide(&self) -> Option<approach::Guide> {
         if !self.minimap.landing_guidance || self.crashed || self.flight_ended.is_some() {
             return None;
         }
-        let field = self.world.airfield_near(self.plane.pos, 18_000.0)?;
+        let (field, runway) = self.approach_airfield()?;
         let g = &field.geo;
-        let selected = self.menu.runway.as_deref().filter(|_| self.menu.airport == Some(g.idx))
-            .and_then(|ident| g.runways.iter().enumerate().find_map(|(i, runway)| {
-                runway.ident.iter().position(|end| airports::norm_ident(end) == airports::norm_ident(ident)).map(|end| (i, end))
-            }));
+        let selected = runway.and_then(|ident| {
+            let ident = airports::norm_ident(ident);
+            g.runways.iter().enumerate().find_map(|(i, runway)| {
+                runway.ident.iter().position(|end| airports::norm_ident(end) == ident).map(|end| (i, end))
+            })
+        });
         let (runway, end) = selected.or(field.traffic.active)
             .or_else(|| g.active(self.wx.wind_from as f32, (self.wx.wind * 1.94384) as f32))?;
         Some(approach::Guide::new(g, runway, end))

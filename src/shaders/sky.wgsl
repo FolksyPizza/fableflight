@@ -90,7 +90,8 @@ fn sky_color(rd: vec3f, jit: f32) -> vec3f {
   // Behind the staged scenery, keep the clear satellite view of the
   // ground visible instead of covering it in the flight atmosphere.
   if (G.start.x < 0.0 && G.detail.w < 1.0 && gnd.x > 0.0) {
-    return globe_sky(rd, fract(jit + G.time.w * 0.618034));
+    // The overhead preview should hold still even on low temporal quality.
+    return globe_sky(rd, 0.5);
   }
   let sun = G.sun_dir.xyz;
   // Fresh jitter every frame: cloud shadows cross the march (light shafts), and the
@@ -106,7 +107,7 @@ fn sky_color(rd: vec3f, jit: f32) -> vec3f {
     var surface = vec3f(0.012, 0.035, 0.07);
     if (G.start.x < 0.0) {
       let texel = globe_texel(n, gnd.x).rgb;
-      if (!globe_water(texel)) { surface = texel; }
+      surface = mix(texel, surface, globe_water(texel));
     }
     col += sc.T * surface * ((sun_trans(0.0, mu) * max(mu, 0.0) + 0.02) * G.sun_dir.w + moon_light(n, 0.0) * max(mum, 0.0)) / PI;
   } else {
@@ -157,8 +158,11 @@ fn globe_texel(n: vec3f, dist: f32) -> vec4f {
   return textureSampleLevel(t_globe, s_repeat, globe_uv(n), lod);
 }
 
-fn globe_water(texel: vec3f) -> bool {
-  return texel.b > 0.004 && texel.b < 0.012 && texel.r < 0.003 && texel.g < 0.004;
+fn globe_water(texel: vec3f) -> f32 {
+  // Fractional coverage retains the filtered coastal pixels at local zoom.
+  let blue = smoothstep(0.002, 0.005, texel.b) * (1.0 - smoothstep(0.009, 0.017, texel.b));
+  let dark = 1.0 - smoothstep(0.002, 0.009, max(texel.r, texel.g));
+  return blue * dark;
 }
 // Cloud cover 0..1 (globeclouds.rs `cover`).
 fn globe_cloud(n: vec3f) -> f32 {
@@ -240,13 +244,13 @@ fn globe_ocean(n: vec3f, V: vec3f, img: vec3f) -> vec3f {
 
 // A drawn surface pixel (or the bare sphere where no tile is drawn yet) on
 // the globe: sea, clouds and their shadows, then the air in front.
-fn globe_surface(P: vec3f, rd: vec3f, surf: vec3f, water: bool, jit: f32) -> vec3f {
+fn globe_surface(P: vec3f, rd: vec3f, surf: vec3f, water: f32, jit: f32) -> vec3f {
   let pp = P - G.planet.xyz;
   let n = normalize(pp);
   let sun = G.sun_dir.xyz;
   let mu = dot(n, sun);
   var col = surf;
-  if (water) { col = globe_ocean(n, -rd, surf); }
+  if (water > 0.0) { col = mix(surf, globe_ocean(n, -rd, vec3f(0.010, 0.025, 0.055)), water); }
   // (the cloud map is ~20 km a texel: it fades out as the view closes in)
   let k = smoothstep(GLOBE_CLOUD_LO, GLOBE_CLOUD_HI, G.up.w);
   // The cloud deck, and its shadow GLOBE_CLOUD_H below, cast away from the sun.
@@ -294,7 +298,7 @@ fn globe_sky(rd: vec3f, jit: f32) -> vec3f {
     let water = globe_water(texel.rgb);
     let light = globe_amb(mu) + globe_sun(mu, 0.0) * (max(mu, 0.0) / PI);
     let cities = vec3f(1.0, 0.68, 0.40) * (texel.a * night_at(n) * G.sun_dir.w * 0.25);
-    let albedo = select(texel.rgb * light + cities, vec3f(0.010, 0.025, 0.055), water);
+    let albedo = texel.rgb * light + cities;
     return globe_surface(p, rd, albedo, water, jit);
   }
   var col = space(rd) + moon_disc(rd);
