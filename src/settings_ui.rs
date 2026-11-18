@@ -451,6 +451,14 @@ impl Game {
                 menu::switch(ui, &mut self.minimap.landing_guidance);
             });
         });
+        card(ui, t!("Flight planner", "Planificateur de vol"), |ui| {
+            row(ui, t!("Remember last departure", "Mémoriser le dernier départ"),
+                t!("Restore the last selected airport, runway and aircraft.", "Retrouve le dernier aéroport, la piste et l’avion."), |ui| {
+                if menu::switch(ui, &mut self.remember_start).changed() && !self.remember_start {
+                    self.last_start = None;
+                }
+            });
+        });
         card(ui, t!("Flight rules", "Règles de vol"), |ui| {
             row(ui, t!("Collisions", "Collisions"), self.collision_mode.description(), |ui| {
                 egui::ComboBox::from_id_salt("collision_mode").selected_text(self.collision_mode.label()).show_ui(ui, |ui| {
@@ -516,6 +524,23 @@ impl Game {
 
     fn set_controls(&mut self, ui: &mut Ui) {
         self.binds_capture_banner(ui);
+        card(ui, t!("Keyboard rudder", "Palonnier au clavier"), |ui| {
+            row(ui, t!("Rudder strength", "Amplitude du palonnier"),
+                t!("Q / E strength. Joystick axes keep their own range.", "Amplitude de Q / E. Les axes du joystick gardent leur plage."), |ui| {
+                ui.add(egui::Slider::new(&mut self.keyboard_rudder, 0.25..=1.0)
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+            });
+            let fine = bind::ACTIONS.iter().find(|action| action.id == "rudder_fine")
+                .and_then(|action| self.binds.key_of(action)).map(bind::key_name);
+            let hint = fine.map_or_else(
+                || t!("Assign Fine keyboard rudder in Keyboard below.", "Attribuez le palonnier précis dans Clavier ci-dessous.").into(),
+                |key| t!("Hold {} with the rudder keys for smaller inputs.", "Maintenez {} avec les touches du palonnier pour affiner.", key),
+            );
+            row(ui, t!("Fine rudder strength", "Amplitude en mode précis"), &hint, |ui| {
+                ui.add(egui::Slider::new(&mut self.keyboard_rudder_fine, 0.1..=0.75)
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+            });
+        });
         card(ui, t!("Ground handling", "Conduite au sol"), |ui| {
             row(ui, t!("Runway steering assist", "Assistance au guidage sur piste"),
                 t!("Helps hold the centreline during the takeoff roll. Pedal input takes over.",

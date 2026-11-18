@@ -5,7 +5,7 @@ use crate::cars::{self, Car};
 use crate::geo::{self, TileId};
 use crate::render::{BuildGpu, DetailDraw, Inst, NearDraw, Renderer, TessCells, TileGpu, TreeDraw, TreeInst, MAX_NEAR};
 use crate::roads::RoadNet;
-use crate::trees::{lod_span, tree_jit, NearCell, TreeDim, Under, CARDS, CARD_RANGE, IMP_DIST, LODS, LOD_DIST, LOD_JITTER, TREE_SPECIES, VARIANTS};
+use crate::trees::{lod_span, tree_jit, NearCell, TreeDim, Under, CARDS, CARD_RANGE, IMP_BLEND, IMP_DIST, LODS, LOD_DIST, LOD_JITTER, TREE_SPECIES, VARIANTS};
 use crate::weapons::{Target, TargetKey};
 use crate::sources::{Job, JobResult, Loader, DATA_ZOOM, GRID, GV};
 use glam::{DMat4, DVec3, DVec4, Vec3};
@@ -1536,7 +1536,7 @@ impl World {
                     // each tree to the one for its own distance. In view, only
                     // trees short of IMP_DIST are drawn as models; the simpler
                     // ones are for the shadows.
-                    let close = dc - ch.radius < imp_dist * (1.0 + LOD_JITTER);
+                    let close = dc - ch.radius < imp_dist * (1.0 + IMP_BLEND) * (1.0 + LOD_JITTER);
                     for lod in 0..LODS - 1 {
                         let (lo, hi) = lod_span(lod);
                         if dc + ch.radius < lo || dc - ch.radius >= hi {
@@ -1551,7 +1551,7 @@ impl World {
                         }
                     }
                     // Further off, the trees are impostors.
-                    if seen && dc + ch.radius >= imp_dist * (1.0 - LOD_JITTER) {
+                    if seen && dc + ch.radius >= imp_dist * (1.0 - IMP_BLEND) * (1.0 - LOD_JITTER) {
                         for (variant, first, count) in &ch.runs {
                             tb.push(TreeDraw { mesh: *variant as u32, first: *first, count: *count, view: true, casc: 0, close: false, imp: true, fixed: false });
                         }
@@ -1575,7 +1575,7 @@ impl World {
                         let t = &b.trees[*i as usize];
                         let to = Vec3::new(t.a[0], t.a[1], t.a[2]) - lp;
                         // Past IMP_DIST the tree is an impostor and has no cards.
-                        if t.a[3] > 0.0 && to.length() < imp_dist * 1.01 * tree_jit(t.a) && seen(to, 26.0 * t.a[3]) {
+                        if t.a[3] > 0.0 && to.length() < imp_dist * (1.0 + IMP_BLEND) * tree_jit(t.a) && seen(to, 26.0 * t.a[3]) {
                             found.push((ring(to.length_squared()) | b.tree_var[*i as usize] as u16, *t));
                         }
                     }

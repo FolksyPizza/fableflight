@@ -85,6 +85,7 @@ enum Nav {
 /// The fewest points of height the interface is laid out for (see `egui_input`).
 pub const UI_MIN_H: f32 = 860.0;
 pub const HUD_H: f32 = 238.0;
+pub const HUD_BOTTOM: f32 = 32.0;
 /// and its width
 pub const HUD_W: f32 = 410.0;
 
@@ -953,9 +954,9 @@ mod departure_tests {
         c.yaw = 0.0;
         runway.apply(&p, &mut c);
         assert!(c.yaw < 0.0 && c.yaw >= -0.30);
-        c.yaw = 0.5;
+        c.yaw = 0.01;
         runway.apply(&p, &mut c);
-        assert_eq!(c.yaw, 0.5);
+        assert_eq!(c.yaw, 0.01);
         c = Controls { brake_left: 0.75, ..Default::default() };
         runway.apply(&p, &mut c);
         assert_eq!(c.yaw, 0.0);
@@ -1012,7 +1013,7 @@ impl RunwaySteering {
     fn apply(self, plane: &Plane, controls: &mut Controls) {
         let throttle = controls.throttle_set.unwrap_or(plane.throttle);
         if !plane.on_ground || plane.hold || throttle < 0.45 || plane.vel.length() < 2.0
-            || controls.yaw.abs() > 0.035 || controls.brake || controls.brake_left > 0.035
+            || controls.yaw.abs() > 0.0001 || controls.brake || controls.brake_left > 0.035
             || controls.brake_right > 0.035 || controls.reverse
         {
             return;
@@ -1249,6 +1250,7 @@ struct Game {
     airport_note: (String, f64),
     /// when the pointer last asked for the flight toolbar (it slides away a moment after)
     toolbar_t: f64,
+    toolbar_hover_blocked: bool,
     /// a weapon's fireball for the renderer's light: position, power, when
     weapon_flash: Option<(DVec3, f32, f64)>,
     /// aircraft shot down and still falling: they burn on the way down and
@@ -1265,6 +1267,7 @@ struct Game {
     loading: Option<Loading>,
     departure_intro: Option<DepartureIntro>,
     menu_overlay: Vec<egui::epaint::ClippedShape>,
+    departure_terrain: f32,
     scenery_cache: settings_ui::SceneryCache,
     name_rx: Option<std::sync::mpsc::Receiver<String>>,
     last_click: f64,
@@ -1309,6 +1312,9 @@ struct Game {
     hold_spot: Option<(f64, f64, f64)>,
     runway_steering: Option<RunwaySteering>,
     runway_assist: bool,
+    keyboard_rudder: f64,
+    keyboard_rudder_fine: f64,
+    remember_start: bool,
     /// the AI copilot's tool calls, and the screenshots waiting for a frame
     mcp_calls: Option<crossbeam_channel::Receiver<mcp::rpc::Call>>,
     mcp_shots: Vec<copilot::PendingShot>,
@@ -1499,9 +1505,9 @@ impl Game {
             record: args.record.clone(), rec_audio: Vec::new(), rec_n: 0, rec_t0: Instant::now(), sound_on: prefs.sound_on, volume: prefs.volume, flight_tools_open: false, info_open: false, menu_hold: None, menu_hold_pending: false, info_page: menu::Page::Flight, pause_open: false, pause_page: menu::Page::Game, pause_at: args.pause_menu, settings_sec: args.settings.unwrap_or(settings_ui::Section::General), look_sens: prefs.look_sens, head: cockpit::Head::new(cy.to_radians(), cp), cockpit_fov: args.fov.unwrap_or(prefs.cockpit_fov).clamp(30.0, 90.0), head_live: false, warn: audio::Warn::default(), warn_t: [-10.0; 4],
             g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, quit: false,
             mode: if args.menu.unwrap_or(true) { Mode::Menu } else { Mode::Fly }, menu, menu_go: args.menu_go, heading: args.heading.to_radians(), destr: destruct::Destruction::new(secs.to_bits()),
-            sheds: damage::Sheds::default(), fx_anchor: plane.pos, fx_shift: DVec3::ZERO, smoke_acc: 0.0, flash: Vec::new(), airport_note: (String::new(), -100.0), toolbar_t: -100.0, weapon_flash: None, kills: Vec::new(), damage_spec: args.damage.clone(), wreck_dirty: false, wreck_t: 0.0, wreck_seen: 0.0,
-            start_rx: None, loading: None, departure_intro: None, menu_overlay: Vec::new(), scenery_cache: Default::default(), name_rx: None, last_click: -10.0, n_cars: 0, city_glow: 0.0, skyglow: Default::default(), gauges: gauges::Gauges::new(&plane, secs.to_bits()), glass, lightning, rain_field: storm::RainField::default(), cam_rain: 0.0, cam_hail: 0.0, storm_adapt: 0.0, plane, weapons,
-            airport_rx: None, hold_spot: None, runway_steering: None, runway_assist: prefs.runway_assist,
+            sheds: damage::Sheds::default(), fx_anchor: plane.pos, fx_shift: DVec3::ZERO, smoke_acc: 0.0, flash: Vec::new(), airport_note: (String::new(), -100.0), toolbar_t: -100.0, toolbar_hover_blocked: false, weapon_flash: None, kills: Vec::new(), damage_spec: args.damage.clone(), wreck_dirty: false, wreck_t: 0.0, wreck_seen: 0.0,
+            start_rx: None, loading: None, departure_intro: None, menu_overlay: Vec::new(), departure_terrain: 1.0, scenery_cache: Default::default(), name_rx: None, last_click: -10.0, n_cars: 0, city_glow: 0.0, skyglow: Default::default(), gauges: gauges::Gauges::new(&plane, secs.to_bits()), glass, lightning, rain_field: storm::RainField::default(), cam_rain: 0.0, cam_hail: 0.0, storm_adapt: 0.0, plane, weapons,
+            airport_rx: None, hold_spot: None, runway_steering: None, runway_assist: prefs.runway_assist, keyboard_rudder: prefs.keyboard_rudder, keyboard_rudder_fine: prefs.keyboard_rudder_fine, remember_start: prefs.remember_start,
             prefs_lang: args.lang.or(prefs.lang),
             prefs_t: 0.0,
             live: live::Live::new(prefs.live_traffic),
@@ -1573,6 +1579,9 @@ impl Game {
     /// Puts the last flight's start back on the globe: the spot, the airport
     /// and how to start there, and the aircraft. Nothing when there was none.
     fn restore_last_start(&mut self) {
+        if !self.remember_start {
+            return;
+        }
         let Some(l) = self.last_start.clone() else { return };
         if let Some(spec) = aircraft::by_key(&l.aircraft) {
             self.menu.aircraft = aircraft::index_of(spec);
@@ -2289,7 +2298,8 @@ impl Game {
         let mut c = Controls {
             pitch: ax(k(KeyCode::KeyS) || k(KeyCode::ArrowDown), k(KeyCode::KeyW) || k(KeyCode::ArrowUp)),
             roll: ax(k(KeyCode::KeyD) || k(KeyCode::ArrowRight), k(KeyCode::KeyA) || k(KeyCode::ArrowLeft)),
-            yaw: ax(k(KeyCode::KeyE), k(KeyCode::KeyQ)) * pedal,
+            yaw: ax(k(KeyCode::KeyE), k(KeyCode::KeyQ)) * pedal * self.keyboard_rudder
+                * if k(KeyCode::Backslash) { self.keyboard_rudder_fine } else { 1.0 },
             throttle: ax(k(KeyCode::ShiftLeft) || k(KeyCode::ShiftRight), k(KeyCode::ControlLeft) || k(KeyCode::ControlRight)),
             brake: k(KeyCode::KeyB),
             brake_left: if k(KeyCode::AltLeft) || self.hot_press.is_some_and(|(i, _, _)| self.cockpit_controls[i].0.hold == Some("brake_left")) { 1.0 } else { 0.0 },
@@ -2664,6 +2674,12 @@ impl Game {
     }
 
     fn set_flight_tools(&mut self, open: bool) {
+        if !open && self.flight_tools_open {
+            // The same click that opened a section can leave the pointer at
+            // the top. Let the close animation finish before hover reopens it.
+            self.toolbar_hover_blocked = true;
+            self.toolbar_t = -100.0;
+        }
         self.flight_tools_open = open;
         self.info_open = false;
         self.menu_hold = None;
@@ -3183,8 +3199,13 @@ impl Game {
         let red = Color32::from_rgb(255, 90, 60);
         let mono = |s: f32| FontId::monospace(s);
         // Beside the instruments, to their right (they take the bottom centre).
-        let x = ctx.content_rect().width() * 0.5 + HUD_W * 0.5 + 12.0;
-        egui::Area::new(egui::Id::unique("nav_inst")).anchor(Align2::LEFT_BOTTOM, [x, -14.0]).interactable(false).show(ctx, |ui| {
+        let available = self.flight_view_width(ctx);
+        let x = available * 0.5 + HUD_W * 0.5 + 12.0;
+        let width = 20.0 + if nav.is_some() { 220.0 } else { 0.0 } + if adf.is_some() { 118.0 } else { 0.0 };
+        if x + width + 14.0 > available {
+            return;
+        }
+        egui::Area::new(egui::Id::unique("nav_inst")).anchor(Align2::LEFT_BOTTOM, [x, -HUD_BOTTOM]).interactable(false).show(ctx, |ui| {
             flightui::glass().inner_margin(10.0).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if let Some((st, r)) = &nav {
@@ -3697,7 +3718,13 @@ impl Game {
         self.flight_ended = None;
         let (lat, lon, _) = geo::pos_to_lla(self.plane.pos);
         self.menu.look_at(lat.to_degrees(), lon.to_degrees(), 60_000.0);
-        self.menu.pick = Some((lat.to_degrees(), lon.to_degrees()));
+        self.menu.pick = None;
+        self.menu.pick_name.clear();
+        self.menu.airport = None;
+        self.menu.runway = None;
+        if self.remember_start {
+            self.restore_last_start();
+        }
         self.menu.hour = (self.utc + lon.to_degrees() / 15.0).rem_euclid(24.0);
         self.menu.starting = false;
         self.menu.screen = menu::Screen::Fly;
@@ -3829,10 +3856,11 @@ impl Game {
         self.goto_rx = None;
         self.set_aircraft(aircraft::nth(self.menu.aircraft));
         self.r.want_obj_kind(self.spec.id as u32);
+        self.departure_terrain = 0.0;
         self.departure_intro = Some(DepartureIntro { from: self.menu.camera().0, eye: self.departure_eye(), elapsed: 0.0 });
         // Remembered for next time (the globe opens on it; the main menu offers it again).
         let db = airports::Db::get();
-        self.last_start = Some(settings::LastStart {
+        self.last_start = self.remember_start.then(|| settings::LastStart {
             lat,
             lon,
             name: self.menu.pick_name.clone(),
@@ -4393,7 +4421,7 @@ impl Game {
 
     /// The settings worth keeping, as they are now.
     fn live_settings(&self) -> settings::Settings {
-        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, hud_cockpit: self.hud_cockpit, minimap: self.minimap.visible, landing_guidance: self.minimap.landing_guidance, runway_assist: self.runway_assist, arcade: self.arcade, collision_mode: self.collision_mode, minimap_plan: self.minimap.plan, minimap_heading_up: self.minimap.heading_up, minimap_zoom: self.minimap.zoom, minimap_size: self.minimap.size.x, minimap_height: self.minimap.size.y, taa: self.gfx.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time, last: self.last_start.clone() }
+        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, hud_cockpit: self.hud_cockpit, minimap: self.minimap.visible, landing_guidance: self.minimap.landing_guidance, runway_assist: self.runway_assist, keyboard_rudder: self.keyboard_rudder, keyboard_rudder_fine: self.keyboard_rudder_fine, remember_start: self.remember_start, arcade: self.arcade, collision_mode: self.collision_mode, minimap_plan: self.minimap.plan, minimap_heading_up: self.minimap.heading_up, minimap_zoom: self.minimap.zoom, minimap_size: self.minimap.size.x, minimap_height: self.minimap.size.y, taa: self.gfx.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time, last: self.last_start.clone() }
     }
 
     /// Saves the settings when they have changed (looked at once a second,
@@ -5174,6 +5202,7 @@ impl Game {
         };
         let vp_jit = Mat4::from_translation(jitter.extend(0.0)) * vp;
         let frustum = world::Frustum::new(DMat4::from_cols_array(&vp.to_cols_array().map(|v| v as f64)));
+        let waiting_above = departing && self.loading.is_none_or(|l| l.descent.is_none());
         let distant_intro = self.departure_intro.is_some() && calt >= 800_000.0;
         let orbit = distant_intro || map_view && (self.menu.screen != menu::Screen::Fly || calt >= 800_000.0);
         let focus_abs = if in_menu { cam } else if self.crashed { self.crash.as_ref().unwrap().site } else { self.plane.pos };
@@ -5212,6 +5241,14 @@ impl Game {
             if loading {
                 self.world.show_departure_from(cam, &frustum);
             }
+        }
+        if waiting_above && !distant_intro {
+            let local_terrain = self.world.ground_zoom(clat, clon).is_some_and(|z| z >= self.world.max_zoom.min(9));
+            if local_terrain {
+                self.departure_terrain = (self.departure_terrain + dt_real as f32 / 0.38).min(1.0);
+            }
+        } else if !departing {
+            self.departure_terrain = 1.0;
         }
         if dt > 0.0 {
             self.world.update_traffic(dt as f32, focus_abs);
@@ -5353,7 +5390,7 @@ impl Game {
             flash: [[0.0; 4]; 2 * storm::MAX_FLASHES],
             rain: [[0.0; 4]; 2],
             quality: [0.0; 4],
-            detail: [self.gfx.city_k(), self.gfx.tree_imp_k(), self.gfx.tree_far(), 0.0],
+            detail: [self.gfx.city_k(), self.gfx.tree_imp_k(), self.gfx.tree_far(), if waiting_above { self.departure_terrain } else { 1.0 }],
             nimbo: if map_view { [[0.0; 4]; 4] } else { self.wx.deck_globals() },
             glow_c: glow[0],
             glow_e: glow[1],
@@ -6392,7 +6429,16 @@ impl Game {
         }
     }
 
-    /// The flight panel (Tab): a see-through column on the right, over the
+    fn flight_sidebar_width(screen_width: f32) -> f32 {
+        (screen_width - 62.0).clamp(180.0, 340.0)
+    }
+
+    fn flight_view_width(&self, ctx: &egui::Context) -> f32 {
+        let width = ctx.content_rect().width();
+        if self.info_open { (width - Self::flight_sidebar_width(width) - 48.0).max(0.0) } else { width }
+    }
+
+    /// The flight panel: a column on the right, over the
     /// game that keeps running: instruments, places to go and the weather.
     #[allow(clippy::too_many_arguments)]
     fn info_panel(&mut self, ctx: &egui::Context, act: &mut Option<PauseAct>, lat: f64, lon: f64, local: f64, speed: f64, alt: f64, agl: f64, hdg: f64) {
@@ -6402,7 +6448,7 @@ impl Game {
             self.info_page = Page::Flight;
         }
         let screen = ctx.content_rect();
-        let width = (screen.width() - 62.0).clamp(180.0, 340.0);
+        let width = Self::flight_sidebar_width(screen.width());
         let max_h = (screen.height() - 150.0).max(40.0);
         let frame = flightui::tools_frame().inner_margin(16.0);
         egui::Area::new(egui::Id::unique("info_panel")).anchor(Align2::RIGHT_TOP, [-14.0, 64.0]).show(ctx, |ui| {
@@ -6751,7 +6797,12 @@ impl Game {
 
         const W: f32 = HUD_W;
         const H: f32 = HUD_H;
-        egui::Area::new(egui::Id::unique("flight_hud")).anchor(Align2::CENTER_BOTTOM, [0.0, -14.0]).interactable(false).show(ctx, |ui| {
+        let available = self.flight_view_width(ctx);
+        if available < W + 12.0 {
+            return;
+        }
+        let shift = (available - ctx.content_rect().width()) * 0.5;
+        egui::Area::new(egui::Id::unique("flight_hud")).anchor(Align2::CENTER_BOTTOM, [shift, -HUD_BOTTOM]).interactable(false).show(ctx, |ui| {
             let (rect, _) = ui.allocate_exact_size(vec2(W, H), egui::Sense::hover());
             let painter = ui.painter().clone();
             let c = pos2(rect.center().x, rect.top() + 34.0 + 74.0);
@@ -7046,7 +7097,7 @@ impl Game {
                 let sys = self.systems_card(ctx, vs, base_up);
                 self.minimap.top = sys.map_or(0.0, |r| r.bottom());
                 self.notices(ctx, airport_hud.as_deref());
-                self.minimap.bottom = 14.0;
+                self.minimap.bottom = HUD_BOTTOM;
             }
             if self.hud_on() && self.radios.show {
                 self.nav_overlay(ctx, hdg);
@@ -7267,7 +7318,8 @@ impl Game {
             if self.hud_on() && !self.pause_open && !self.show_help && !self.goto_open {
                 if self.minimap.visible {
                     let horizontal = f.dot(e).hypot(f.dot(n));
-                    self.minimap.show(ctx, &self.src, lat, lon, (horizontal > 1e-5).then_some(hdg.to_radians()), self.info_open, landing_guide.as_ref(), &self.world);
+                    let width = self.flight_view_width(ctx);
+                    self.minimap.show(ctx, &self.src, lat, lon, (horizontal > 1e-5).then_some(hdg.to_radians()), width, landing_guide.as_ref(), &self.world);
                 }
             }
             if self.show_help {

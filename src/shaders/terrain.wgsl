@@ -742,6 +742,8 @@ fn city_glow(gq: vec2f, dens: f32, dcx: vec2f, dcy: vec2f, upn: vec3f) -> vec3f 
 
 // ------------------------------------------------------------ surface
 @fragment fn fs(in: VOut) -> GOut {
+  // Reveal loaded terrain over the globe as the overhead preview settles.
+  if (G.start.x < 0.0 && G.detail.w < 1.0 && ign(in.clip.xy) >= G.detail.w) { discard; }
   // Derivatives first, while every pixel of the quad is still running.
   let wc0 = wave_coord(in.P);
   let dx = dpdx(wc0);

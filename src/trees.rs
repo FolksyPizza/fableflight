@@ -35,6 +35,8 @@ pub const CARD_RANGE: f32 = 150.0;
 /// an impostor, a picture of its full model (impostor.rs). Must match
 /// `IMP_DIST` in trees.wgsl, and stay below the range of the leaf cards.
 pub const IMP_DIST: f32 = 120.0;
+/// Half-width of the model/impostor blend relative to IMP_DIST.
+pub const IMP_BLEND: f32 = 0.18;
 /// A tree's own factor on its change-over distances, from its position.
 /// Must match `tree_jit` in trees.wgsl.
 pub fn tree_jit(a: [f32; 4]) -> f32 {

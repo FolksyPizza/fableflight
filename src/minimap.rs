@@ -334,11 +334,10 @@ impl Minimap {
         }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, heading: Option<f64>, info_open: bool, guide: Option<&crate::approach::Guide>, world: &crate::world::World) {
+    pub fn show(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, heading: Option<f64>, view_width: f32, guide: Option<&crate::approach::Guide>, world: &crate::world::World) {
         let screen = ctx.content_rect();
-        let side = (screen.width() - crate::HUD_W) * 0.5 - 26.0;
-        let reserved_width = if info_open { 426.0 } else { 44.0 };
-        let limit = side.min(screen.width() - reserved_width).min(screen.bottom() - self.bottom - 52.0 - self.top).min(640.0);
+        let side = (view_width - crate::HUD_W) * 0.5 - 26.0;
+        let limit = side.min(screen.bottom() - self.bottom - 52.0 - self.top).min(640.0);
         if limit < 74.0 {
             return;
         }

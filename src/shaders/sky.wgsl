@@ -86,13 +86,18 @@ fn sky_color(rd: vec3f, jit: f32) -> vec3f {
     if (gk >= 1.0) { return globe; }
   }
   let oc = -G.planet.xyz;
+  let gnd = ray_sphere(oc, rd, G.planet.w);
+  // Behind the staged scenery, keep the clear satellite view of the
+  // ground visible instead of covering it in the flight atmosphere.
+  if (G.start.x < 0.0 && G.detail.w < 1.0 && gnd.x > 0.0) {
+    return globe_sky(rd, fract(jit + G.time.w * 0.618034));
+  }
   let sun = G.sun_dir.xyz;
   // Fresh jitter every frame: cloud shadows cross the march (light shafts), and the
   // temporal AA smooths what the steps miss.
   let steps = select(24, 14, G.quality.x > 1.5);
   let sc = sky_march(rd, steps, fract(jit + G.time.w * 0.618034));
   var col = sc.L;
-  let gnd = ray_sphere(oc, rd, G.planet.w);
   if (gnd.x > 0.0) {
     let p = oc + rd * gnd.x;
     let n = normalize(p);

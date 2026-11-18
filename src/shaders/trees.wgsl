@@ -19,6 +19,7 @@ struct VOut {
   @location(2) col: vec4f,
   @location(3) L: vec3f,
   @location(4) mat: vec3f,   // kind of bark, openness to the sky, height up the tree
+  @location(5) @interpolate(flat) blend: f32,
 };
 struct CVOut {
   @builtin(position) clip: vec4f,
@@ -30,6 +31,7 @@ struct CVOut {
   @location(5) grow: f32,
   @location(6) sun: vec3f,   // sunlight and skylight reaching the spray
   @location(7) amb: vec3f,
+  @location(8) @interpolate(flat) blend: f32,
 };
 struct GOut { @location(0) c: vec4f, @location(1) n: vec4f, @location(2) amb: f32 };
 struct COut { @location(0) c: vec4f, @location(1) n: vec4f, @location(2) amb: f32, @builtin(sample_mask) mask: u32 };
@@ -59,9 +61,15 @@ fn lod_of(d: f32, ia: vec4f) -> f32 {
 // Beyond this (moved by the tree's own jitter) a standing tree is drawn as an
 // impostor. Must match IMP_DIST in trees.rs.
 const IMP_DIST = 120.0;
-// Whether a tree (not undergrowth, not a loose tree) is far enough away to be an impostor.
-fn imp_far(ia: vec4f, far: f32) -> bool {
-  return far >= 250.0 && T.offset.w < 0.5 && length(ia.xyz + T.offset.xyz) / tree_jit(ia) >= IMP_DIST * tree_imp_k();
+// Must match the overlap submitted by world.rs (IMP_BLEND in trees.rs).
+const IMP_BLEND = 0.18;
+fn imp_blend(ia: vec4f, d: f32) -> f32 {
+  let threshold = IMP_DIST * tree_imp_k() * tree_jit(ia);
+  return smoothstep(threshold * (1.0 - IMP_BLEND), threshold * (1.0 + IMP_BLEND), d);
+}
+fn model_blend(ia: vec4f, d: f32, far: f32) -> f32 {
+  if (far < 250.0 || T.offset.w >= 0.5) { return 0.0; }
+  return imp_blend(ia, d);
 }
 // Whether this vertex belongs to a model other than the one the instance is
 // drawn with. Undergrowth (far < 250) and loose trees (T.offset.w = 1) only
@@ -128,7 +136,7 @@ fn solid_vertex(pos: vec3f, nrm: vec3f, col: vec4f, ia: vec4f, ib: vec4f, tint: 
   let w = tree_world(pos + aux.xyz * k, nrm, leaf, ia, ib, tint.a * 255.0, vec2f(0.0));
   // The tint is the canopy colour seen from above: bark only takes its brightness.
   let tn = mix(vec3f(dot(tint.rgb, vec3f(1.0 / 3.0))), tint.rgb, leaf);
-  return VOut(G.view_proj * vec4f(w.P, 1.0), w.P, w.N, vec4f(col.rgb * tn * 2.0, leaf), w.L + ia.xyz * 0.37, vec3f(uv.w, aux.w, w.L.y));
+  return VOut(G.view_proj * vec4f(w.P, 1.0), w.P, w.N, vec4f(col.rgb * tn * 2.0, leaf), w.L + ia.xyz * 0.37, vec3f(uv.w, aux.w, w.L.y), 0.0);
 }
 @vertex fn vs(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(2) col: vec4f, @location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f, @location(6) uv: vec4f, @location(7) aux: vec4f) -> VOut {
   return solid_vertex(pos, nrm, col, ia, ib, tint, uv, aux);
@@ -136,7 +144,8 @@ fn solid_vertex(pos: vec3f, nrm: vec3f, col: vec4f, ia: vec4f, ib: vec4f, tint: 
 // Trees close enough not to be impostors, and undergrowth.
 @vertex fn vs_near(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(2) col: vec4f, @location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f, @location(6) uv: vec4f, @location(7) aux: vec4f) -> VOut {
   var o = solid_vertex(pos, nrm, col, ia, ib, tint, uv, aux);
-  if (imp_far(ia, tint.a * 255.0)) { o.clip = vec4f(2.0, 2.0, 0.0, 1.0); }
+  o.blend = model_blend(ia, length(ia.xyz + T.offset.xyz), tint.a * 255.0);
+  if (o.blend >= 1.0) { o.clip = vec4f(2.0, 2.0, 0.0, 1.0); }
   return o;
 }
 @vertex fn vs_shadow(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(2) col: vec4f, @location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f, @location(6) uv: vec4f) -> @builtin(position) vec4f {
@@ -170,13 +179,14 @@ fn crown_cover(cl: f32, fw: f32, facing: f32, amount: f32) -> f32 {
   let d = length(ia.xyz + T.offset.xyz);
   var grow = clamp((near_k(d) * mix(1.25, SPRAY_FAR, smoothstep(35.0, 100.0, d)) - uv.z) * 4.0, 0.0, 1.0);
   if (far < 250.0) { grow = 1.0; }
-  if (imp_far(ia, far)) { grow = 0.0; }
+  let blend = model_blend(ia, d, far);
+  if (blend >= 1.0) { grow = 0.0; }
   let w = tree_world(pos, nrm, 1.0, ia, ib, far, vec2f(0.05 * uv.x, uv.z));
   var clip = G.view_proj * vec4f(w.P, 1.0);
   if (grow <= 0.0) { clip = vec4f(2.0, 2.0, 0.0, 1.0); }
   // Light varies slowly across a spray, so it is worked out here rather than per pixel.
   let l = light_at(w.P);
-  return CVOut(clip, w.P, w.N, vec4f(col.rgb * tint.rgb * 2.0, col.a), uv, aux, grow, l.sun, l.amb);
+  return CVOut(clip, w.P, w.N, vec4f(col.rgb * tint.rgb * 2.0, col.a), uv, aux, grow, l.sun, l.amb, blend);
 }
 
 // ------------------------------------------------------------ foliage light
@@ -341,7 +351,7 @@ fn solid_frag(in: VOut, cut: bool) -> Solid {
 // 1 for the composite). Writing the sample mask costs the early depth test, so
 // only trees close to the camera use this.
 @fragment fn fs_cut(in: VOut) -> COut {
-  if (photo_hides(in.P, in.clip.xy)) { discard; }
+  if (ign(in.clip.xy) < in.blend || photo_hides(in.P, in.clip.xy)) { discard; }
   let o = solid_frag(in, true);
   let cnt = min(u32(o.cover * 4.0 + ign(in.clip.xy)), 4u);
   if (cnt == 0u) { discard; }
@@ -426,7 +436,7 @@ fn blades(uv: vec2f, seed: f32, grow: f32) -> vec4f {
 }
 
 @fragment fn fs_card(in: CVOut) -> COut {
-  if (photo_hides(in.P, in.clip.xy)) { discard; }
+  if (ign(in.clip.xy) < in.blend || photo_hides(in.P, in.clip.xy)) { discard; }
   let aspect = in.aux.x;
   let p = vec2f(in.uv.x, in.uv.y * aspect);
   // Size of a pixel in card lengths, and the card's true facing.
@@ -645,13 +655,16 @@ struct IOut {
   @location(9) @interpolate(flat) ka: vec4f,
   @location(10) @interpolate(flat) kb: vec2f,
   @location(11) @interpolate(flat) C: vec3f,          // centre of the bounding sphere
+  @location(12) @interpolate(flat) blend: f32,
 };
 @vertex fn vs_imp(@location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f, @builtin(vertex_index) vi: u32) -> IOut {
   var o: IOut;
   o.clip = vec4f(2.0, 2.0, 0.0, 1.0);
   let base = ia.xyz + T.offset.xyz;
   let d = length(base);
-  if (ia.w <= 0.0 || d / tree_jit(ia) < IMP_DIST * tree_imp_k() || d > tree_far()) { return o; }
+  let blend = imp_blend(ia, d);
+  if (ia.w <= 0.0 || blend <= 0.0 || d > tree_far()) { return o; }
+  o.blend = blend;
   let layer = vi / 4u;
   let corner = vec2f(f32(vi & 1u), f32((vi >> 1u) & 1u)) * 2.0 - 1.0;
   let b = IB.b[layer];
@@ -722,7 +735,8 @@ struct IOut {
   return o;
 }
 @fragment fn fs_imp(in: IOut) -> COut {
-  if (photo_hides(in.Q, in.clip.xy)) { discard; }
+  // Complementary coverage with the model and leaf cards in the overlap.
+  if (ign(in.clip.xy) >= in.blend || photo_hides(in.Q, in.clip.xy)) { discard; }
   // The farthest trees dissolve away (how far: the graphics settings).
   let tf = tree_far();
   if (ign(in.clip.xy) >= 1.0 - smoothstep(tf * 0.8, tf, length(in.C))) { discard; }
@@ -736,11 +750,11 @@ struct IOut {
   // the hand-over from one picture to the next.
   var ww = pow(in.w, vec3f(12.0));
   ww /= ww.x + ww.y + ww.z;
-  // low preset takes the nearest picture alone, without the depth search.
+  // Low still blends near a view boundary. Skip the depth search and fade
+  // minor weights to zero so most views need only one picture's textures.
   let lowq = G.quality.x > 1.5;
   if (lowq) {
-    let m = max(ww.x, max(ww.y, ww.z));
-    ww = select(vec3f(0.0), vec3f(1.0), ww >= vec3f(m));
+    ww *= smoothstep(vec3f(0.04), vec3f(0.16), ww);
     ww /= ww.x + ww.y + ww.z;
   }
   let uvs = array<vec2f, 3>(in.uva.xy, in.uva.zw, in.uvb);

@@ -47,7 +47,10 @@ impl Game {
     pub(crate) fn toolbar(&mut self, ctx: &egui::Context, bar: &mut Option<Bar>) {
         let screen = ctx.content_rect();
         let near_top = ctx.pointer_latest_pos().is_some_and(|p| p.y < BAR_EDGE && screen.contains(p));
-        if near_top || self.flight_tools_open {
+        if !near_top {
+            self.toolbar_hover_blocked = false;
+        }
+        if self.flight_tools_open || (near_top && !self.toolbar_hover_blocked) {
             self.toolbar_t = self.real;
         }
         let want = self.real - self.toolbar_t < BAR_LINGER;
@@ -143,13 +146,16 @@ impl Game {
     /// then the live line, coloured 1 good, 2 caution, 3 warning).
     pub(crate) fn notices(&mut self, ctx: &egui::Context, airport: Option<&[(String, u8)]>) {
         // A new airport (or a new runway in use) brings its notice back.
+        let view_width = self.flight_view_width(ctx);
+        let shift = (view_width - ctx.content_rect().width()) * 0.5;
         let key = airport.map(|l| l.iter().take(2).map(|x| x.0.as_str()).collect::<Vec<_>>().join("|")).unwrap_or_default();
         if key != self.airport_note.0 {
             self.airport_note = (key.clone(), if key.is_empty() { -100.0 } else { self.real });
         }
         let fade = |since: f64, show: f64| -> f32 { (1.0 - ((self.real - since - (show - NOTE_FADE)) / NOTE_FADE).max(0.0)).clamp(0.0, 1.0) as f32 };
         let mut notes: Vec<(f32, Vec<(String, egui::FontId, Color32)>)> = Vec::new();
-        if let (Some(lines), a) = (airport, fade(self.airport_note.1, NOTE_SHOW)) {
+        let airport_notice = airport.filter(|_| !(self.info_open && self.info_page == Page::Flight));
+        if let (Some(lines), a) = (airport_notice, fade(self.airport_note.1, NOTE_SHOW)) {
             if a > 0.0 && !lines.is_empty() {
                 let mut v = vec![(lines[0].0.clone(), menu::item_title(), Color32::WHITE)];
                 if let Some(l) = lines.get(1) {
@@ -169,7 +175,8 @@ impl Game {
             // under the toolbar while it is down
             let top = if self.real - self.toolbar_t < BAR_LINGER { 65.0 } else { 14.0 };
             let y = ctx.animate_value_with_time(egui::Id::unique("notes_y"), top, 0.2);
-            egui::Area::new(egui::Id::unique("notices")).anchor(Align2::CENTER_TOP, [0.0, y]).interactable(false).show(ctx, |ui| {
+            egui::Area::new(egui::Id::unique("notices")).anchor(Align2::CENTER_TOP, [shift, y]).interactable(false).show(ctx, |ui| {
+                ui.set_max_width((view_width - 24.0).max(100.0));
                 ui.spacing_mut().item_spacing.y = 6.0;
                 ui.vertical_centered(|ui| {
                     for (a, lines) in &notes {
@@ -178,7 +185,7 @@ impl Game {
                             ui.multiply_opacity(*a);
                             glass().inner_margin(egui::Margin::symmetric(18, 10)).show(ui, |ui| {
                                 ui.spacing_mut().item_spacing.y = 2.0;
-                                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                                 for (text, font, col) in lines {
                                     ui.label(RichText::new(text).font(font.clone()).color(*col));
                                 }
@@ -191,7 +198,7 @@ impl Game {
         }
         // The live line: on a runway, at a holding point, or on an approach.
         let guidance = airport.and_then(|l| l.get(2)).is_some();
-        self.ap_strip(ctx, guidance);
+        self.ap_strip(ctx, guidance, shift);
         if let Some((text, col)) = airport.and_then(|l| l.get(2)) {
             let col = match col {
                 1 => menu::OK,
@@ -199,7 +206,7 @@ impl Game {
                 3 => menu::BAD,
                 _ => TEXT,
             };
-            egui::Area::new(egui::Id::unique("guidance")).anchor(Align2::CENTER_BOTTOM, [0.0, -14.0 - crate::HUD_H - 10.0]).interactable(false).show(ctx, |ui| {
+            egui::Area::new(egui::Id::unique("guidance")).anchor(Align2::CENTER_BOTTOM, [shift, -crate::HUD_BOTTOM - crate::HUD_H - 10.0]).interactable(false).show(ctx, |ui| {
                 glass().inner_margin(egui::Margin::symmetric(14, 6)).show(ui, |ui| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                     ui.horizontal(|ui| {
@@ -215,7 +222,7 @@ impl Game {
     /// The autopilot's modes over the instruments, as an annunciator strip:
     /// green what it flies, grey what is armed; "AP OFF" flashing amber a
     /// few seconds after it lets go. Above the guidance line when that shows.
-    fn ap_strip(&self, ctx: &egui::Context, guidance: bool) {
+    fn ap_strip(&self, ctx: &egui::Context, guidance: bool, shift: f32) {
         let off_for = self.real - self.ap_off_t;
         let hold = self.menu_hold.as_ref();
         let flash = !self.ap.on && hold.is_none() && off_for < 4.0;
@@ -223,7 +230,7 @@ impl Game {
             return;
         }
         let lift = if guidance { 44.0 } else { 0.0 };
-        egui::Area::new(egui::Id::unique("ap_strip")).anchor(Align2::CENTER_BOTTOM, [0.0, -14.0 - crate::HUD_H - 10.0 - lift]).interactable(false).show(ctx, |ui| {
+        egui::Area::new(egui::Id::unique("ap_strip")).anchor(Align2::CENTER_BOTTOM, [shift, -crate::HUD_BOTTOM - crate::HUD_H - 10.0 - lift]).interactable(false).show(ctx, |ui| {
             glass().inner_margin(egui::Margin::symmetric(14, 6)).show(ui, |ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 ui.horizontal(|ui| {

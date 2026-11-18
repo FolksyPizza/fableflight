@@ -107,6 +107,7 @@ pub const ACTIONS: &[Action] = &[
     act("roll_right", KeyCode::KeyD, "Roll right", "Roulis à droite"),
     act("rudder_left", KeyCode::KeyQ, "Rudder / steer left", "Palonnier / direction à gauche"),
     act("rudder_right", KeyCode::KeyE, "Rudder / steer right", "Palonnier / direction à droite"),
+    act("rudder_fine", KeyCode::Backslash, "Fine keyboard rudder (hold)", "Palonnier clavier précis (maintenir)"),
     act("throttle_up", KeyCode::ShiftLeft, "Throttle up", "Plus de gaz"),
     act("throttle_down", KeyCode::ControlLeft, "Throttle down", "Moins de gaz"),
     act("trim_down", KeyCode::Numpad7, "Trim nose down", "Trim à piquer"),
