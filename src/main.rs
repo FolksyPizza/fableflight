@@ -1909,6 +1909,7 @@ impl Game {
         let nav = if p5[0] >= 999.0 { 1.0 } else { 0.0 };
         let mut beam: [(Vec3, f32); 2] = [(Vec3::ZERO, 0.0); 2];
         let mut beam_dir = Vec3::ZERO;
+        let bend = self.plane.wing_bend();
         let mid = {
             let xs: Vec<f32> = self.lamps.iter().filter(|l| l.id == lamp::LANDING as u32 && l.at.x.abs() > 0.5).map(|l| l.at.x).collect();
             xs.iter().sum::<f32>() / xs.len().max(1) as f32
@@ -1919,7 +1920,14 @@ impl Game {
                 continue;
             }
             let m = *base * pose[l.piece];
-            let at = m.transform_point3(l.at);
+            // (a wingtip light rides on the bent wing, as plane.wgsl bends it)
+            let mut b = pose[l.piece].transform_point3(l.at);
+            b.y += b.x * b.x * match p.group {
+                airframe::G_LWING => bend[0],
+                airframe::G_RWING => bend[1],
+                _ => 0.0,
+            };
+            let at = base.transform_point3(b);
             let fwd = m.transform_vector3(Vec3::NEG_Z).normalize();
             let right = m.transform_vector3(Vec3::X).normalize();
             // The navigation lights show only in their sectors: red ahead and
@@ -5145,7 +5153,10 @@ impl Game {
                         }
                     }
                     if !imp.water {
-                        self.destr.blast_trees(&mut self.world, &self.r.queue, site, (26.0 + 30.0 * power as f64) * reach as f64, gone, &mut femit);
+                        // A fireball flattens the trees around; without one only those
+                        // the wreck itself ploughs into go down.
+                        let blast = if crash.ignited { 26.0 + 30.0 * power as f64 } else { 6.0 + 4.0 * power as f64 };
+                        self.destr.blast_trees(&mut self.world, &self.r.queue, site, blast * reach as f64, gone, &mut femit);
                     }
                     self.crash = Some(crash);
                     self.crashed = true;
@@ -5813,12 +5824,14 @@ impl Game {
                 g.foam[2 * i + 1] = [k, age, seed, 0.0];
             }
             if self.crashed || cr.time < 240.0 {
+                // (the airframe's dent stays on the pieces it breaks into: their meshes are in the body frame)
+                let dent = (self.plane.dmg.crumple, self.plane.dmg.crumple_dir);
                 for (i, d) in cr.debris.iter().enumerate() {
                     if d.sunk {
                         continue;
                     }
                     let m = Mat4::from_scale_rotation_translation(Vec3::splat(d.scale), d.rot.as_quat(), (d.pos - cam).as_vec3()) * Mat4::from_translation(-d.origin);
-                    objs.push(DrawObj { mesh: d.mesh, model: m, tint: [1.0, 1.0, 1.0, d.char], glow: [if d.burn > 0.0 { if d.rigid { 0.35 } else { 1.0 } } else if cr.water { 0.0 } else { 0.25 }, self.spec.id as f32, 0.0, i as f32 * 0.37], cast: 0b11, cut: true, tear: [d.tear[0].gpu(), d.tear[1].gpu()], dmg: [d.tear[0].mode, d.tear[1].mode, 0.6, d.jag], ..DrawObj::DEFAULT });
+                    objs.push(DrawObj { mesh: d.mesh, model: m, tint: [1.0, 1.0, 1.0, d.char], glow: [if d.burn > 0.0 { if d.rigid { 0.35 } else { 1.0 } } else if cr.water { 0.0 } else { 0.25 }, self.spec.id as f32, 0.0, i as f32 * 0.37], cast: 0b11, cut: true, tear: [d.tear[0].gpu(), d.tear[1].gpu()], dmg: [d.tear[0].mode, d.tear[1].mode, 0.6, d.jag], crumple: if d.group.is_some() { dent.0 } else { [0.0; 4] }, crumple_dir: if d.group.is_some() { dent.1 } else { [0.0; 4] }, ..DrawObj::DEFAULT });
                 }
             }
         }
@@ -5854,6 +5867,7 @@ impl Game {
             let dm = self.plane.dmg;
             let kind = self.spec.id as f32;
             let rain_ph = self.glass.phases();
+            let bend = self.plane.wing_bend();
             // What the exhaust shows (plane.wgsl, the plume and the nozzles): how far the
             // afterburners are lit, and how hard the engines are running dry (0 idle .. 1).
             let (burner, dry, nozzle_z) = match &self.spec.engine {
@@ -5913,6 +5927,14 @@ impl Game {
                     tear: [tears[0].gpu(), tears[1].gpu()],
                     dmg: [tears[0].mode, tears[1].mode, dm.scuff[p.group], dm.jag_for(p)],
                     dmg2: [dm.oil, dm.crack[0], dm.crack[1], dm.crack[2]],
+                    crumple: dm.crumple,
+                    crumple_dir: dm.crumple_dir,
+                    pose: pose_rows(&pose[i]),
+                    flex: match p.group {
+                        airframe::G_LWING => bend[0],
+                        airframe::G_RWING => bend[1],
+                        _ => 0.0,
+                    },
                     ..DrawObj::DEFAULT
                 });
             }
@@ -8654,4 +8676,9 @@ struct Kill {
     /// seconds since the hit, and the trail particles owed
     t: f64,
     acc: f64,
+}
+
+/// The top three rows of a piece's pose, for the shader (render.rs `DrawObj::pose`).
+fn pose_rows(m: &Mat4) -> [[f32; 4]; 3] {
+    [m.row(0).to_array(), m.row(1).to_array(), m.row(2).to_array()]
 }

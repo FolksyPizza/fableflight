@@ -6,8 +6,12 @@
 
 // tear: up to two breaks through the body frame (plane normal, offset); dmg:
 // the mode of each (see damage.rs), scrapes 0..1, raggedness of the edge (m);
-// dmg2: oil film on the windshield, crack centre z and y, crack size.
-struct Obj { model: mat4x4f, tint: vec4f, glow: vec4f, params: array<vec4f, 6>, tear: array<vec4f, 2>, dmg: vec4f, dmg2: vec4f };
+// dmg2: oil film on the windshield, crack centre z and y, crack size;
+// crumple: a lasting dent's centre (body frame) and radius, crumple_dir the
+// way it was pushed in and its depth (damage.rs); pose: the top three rows of
+// the piece's pose, mesh frame to body frame; flex.x: wing bending, the tip's
+// deflection over the half-span squared (main.rs, plane.rs `wing_flex`).
+struct Obj { model: mat4x4f, tint: vec4f, glow: vec4f, params: array<vec4f, 6>, tear: array<vec4f, 2>, dmg: vec4f, dmg2: vec4f, crumple: vec4f, crumple_dir: vec4f, pose: array<vec4f, 3>, flex: vec4f };
 @group(1) @binding(0) var<uniform> O: Obj;
 @group(2) @binding(0) var<uniform> CS: Cascade;
 // The glass pass only: the lit scene before the glass went on, and its depth.
@@ -81,16 +85,63 @@ struct VOut {
 struct GOut { @location(0) c: vec4f, @location(1) n: vec4f, @location(2) amb: f32 };
 struct SOut { @builtin(position) clip: vec4f, @location(0) L: vec3f, @location(1) @interpolate(flat) mat: vec4f };
 
+// The airframe's shape under load and after a hard hit, worked out in the
+// body frame (so a deflected aileron bends with its wing about the bent hinge):
+// the wing bent up in a parabola from the centreline to the tip's deflection,
+// and a lasting dent, a smooth bowl pushed in along the blow, only on the
+// faces turned to it (the far side of a fuselage stays put). The normal is
+// tilted by the same displacement so the light shows the shape. Glass and a
+// rocket's plume are left as they are.
+struct Bent { p: vec3f, n: vec3f };
+fn deform(p: vec3f, n: vec3f, mat: vec4f) -> Bent {
+  let m = u32(mat.x + 0.5);
+  let depth = O.crumple_dir.w;
+  let dented = O.crumple.w > 0.001 && depth > 0.001;
+  if (m == M_GLASS || m == M_PLUME || (!dented && O.flex.x == 0.0)) { return Bent(p, n); }
+  let r0 = O.pose[0]; let r1 = O.pose[1]; let r2 = O.pose[2];
+  let b = vec3f(dot(r0, vec4f(p, 1.0)), dot(r1, vec4f(p, 1.0)), dot(r2, vec4f(p, 1.0)));
+  let nb = vec3f(dot(r0.xyz, n), dot(r1.xyz, n), dot(r2.xyz, n));
+  var d = vec3f(0.0);
+  // For a displacement d(b) the normal goes (to first order) to n - J^T n,
+  // J the displacement's gradient.
+  var jn = vec3f(0.0);
+  let bend = O.flex.x;
+  d.y += bend * b.x * b.x;
+  jn.x += 2.0 * bend * b.x * nb.y;
+  if (dented) {
+    let rel = b - O.crumple.xyz;
+    let dist = length(rel);
+    let rad = O.crumple.w;
+    if (dist < rad) {
+      let t = 1.0 - dist / rad;
+      let inward = normalize(O.crumple_dir.xyz);
+      let facing = smoothstep(-0.1, 0.65, dot(nb, -inward));
+      let wrinkle = nz(b * 5.5).x - 0.5;
+      let k = depth * facing;
+      d += inward * (k * t * t * (3.0 - 2.0 * t) * (1.0 + 0.12 * wrinkle));
+      // (d/d dist of the smoothstep bowl, along the way out from its centre)
+      jn += rel / max(dist, 1e-4) * (-k * 6.0 * t * (1.0 - t) / rad) * dot(inward, nb);
+    }
+  }
+  // Back into the mesh frame: the pose's rotation is orthonormal, so its
+  // transpose takes body-frame vectors back.
+  let back = d.x * r0.xyz + d.y * r1.xyz + d.z * r2.xyz;
+  let nn = nb - jn;
+  return Bent(p + back, normalize(nn.x * r0.xyz + nn.y * r1.xyz + nn.z * r2.xyz));
+}
+
 @vertex fn vs(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(2) col: vec4f, @location(3) uv: vec2f, @location(4) mat: vec4f) -> VOut {
   // (A rocket's plume is as wide as the engines burning make it, and spreads in thin air.)
-  var at = pos;
+  let bent = deform(pos, nrm, mat);
+  var at = bent.p;
   if (kind() == 5u && u32(mat.x + 0.5) == M_PLUME) { at = vec3f(pos.xy * rocket_spread(pos), pos.z); }
   let P = (O.model * vec4f(at, 1.0)).xyz;
-  let N = (O.model * vec4f(nrm, 0.0)).xyz;
+  let N = (O.model * vec4f(bent.n, 0.0)).xyz;
   return VOut(G.view_proj * vec4f(P, 1.0), P, N, col, uv, mat, mat.z, pos, nrm);
 }
-@vertex fn vs_shadow(@location(0) pos: vec3f, @location(4) mat: vec4f) -> SOut {
-  return SOut(CS.vp * vec4f((O.model * vec4f(pos, 1.0)).xyz, 1.0), pos, mat);
+@vertex fn vs_shadow(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(4) mat: vec4f) -> SOut {
+  let at = deform(pos, nrm, mat).p;
+  return SOut(CS.vp * vec4f((O.model * vec4f(at, 1.0)).xyz, 1.0), pos, mat);
 }
 @fragment fn fs_shadow(in: SOut) {
   // Sunlight comes in through the windows, the gear wells stay open, and

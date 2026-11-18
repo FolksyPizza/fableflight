@@ -1,8 +1,7 @@
-//! Crashes: the aircraft breaks into tumbling, burning parts and its fuel goes
-//! up in one big rolling fireball, followed by fires along the skid path, a
-//! smoke column, a flash of light and scorched ground. Into the water there is
-//! no fire: a great splash, white water, and wreckage that floats a while,
-//! wallowing and settling as it floods, before it goes under.
+//! Crashes: the airframe breaks into tumbling parts; ruptured fuel may ignite
+//! into a rolling fireball, while survivable fuel-free impacts leave a wreck.
+//! Into the water there is no fire: a great splash, white water, and wreckage
+//! that floats a while, wallowing and settling as it floods, before it goes under.
 use crate::geo;
 use crate::airframe::{self, Mesh};
 use crate::damage::{self, Tear};
@@ -129,6 +128,8 @@ pub struct Crash {
     pub water: bool,
     pub time: f64,
     pub power: f32,
+    /// whether the fuel caught fire (never in the water)
+    pub ignited: bool,
     pub debris: Vec<Debris>,
     fires: Vec<Fire>,
     pending: Vec<Blast>,
@@ -178,6 +179,15 @@ pub const SOOT: f32 = 8.0; // smoke carried on from the fire simulation
 pub const GLASS: f32 = 9.0; // shards of window glass
 pub const DROPS: f32 = 10.0; // thrown water, streaked along its flight
 
+fn crash_ignition_chance(fuel: f32, energy_per_kg: f32, steep: f32, tank_hit: bool) -> f32 {
+    let fuel = fuel.clamp(0.0, 1.0);
+    if fuel <= 0.02 { return 0.0; }
+    if tank_hit { return 0.95 * fuel; }
+    let x = ((energy_per_kg - 250.0) / 1_750.0).clamp(0.0, 1.0);
+    let severity = x * x * (3.0 - 2.0 * x);
+    severity * fuel * (0.45 + 0.55 * steep.clamp(0.0, 1.0))
+}
+
 impl Crash {
     /// `meshes`: renderer meshes of the aircraft's breakable groups, then the two
     /// shard shapes; `pivots`: each group's centre and size (body frame);
@@ -199,6 +209,12 @@ impl Crash {
         let vn = imp.vel.dot(up);
         let slide = imp.vel - up * vn;
         let water = imp.water;
+        let fuel = if spec.fuel_kg > 0.0 { (plane.fuel / spec.fuel_kg).clamp(0.0, 1.0) as f32 } else { 0.0 };
+        let steep = (-vn / speed.max(1.0) as f64).clamp(0.0, 1.0) as f32;
+        let tank_hit = plane.cause == "wing tank";
+        let ignition_chance = crash_ignition_chance(fuel, 0.5 * speed * speed, steep, tank_hit);
+        let ignited = !water && fuel > 0.02 && rng.f() < ignition_chance;
+        let fire_power = power * (0.35 + 0.65 * fuel);
         let carry = if water {
             // Water gives way, but it is no cushion: the downward part is
             // stopped dead and the pieces skip on along the surface, until
@@ -377,6 +393,11 @@ impl Crash {
                 if !d.rigid {
                     d.vel = carry * rng.range(0.6, 1.0) as f64 + rng.dir().as_dvec3() * 2.0;
                 }
+            } else if !ignited {
+                // A structural crash can scatter a wreck without automatically
+                // igniting intact, cool fuel tanks.
+                d.burn = 0.0;
+                d.char = 0.0;
             }
             debris.push(d);
         }
@@ -398,8 +419,8 @@ impl Crash {
                 omega: rng.dir().as_dvec3() * rng.range(5.0, 25.0) as f64 / ss as f64,
                 scale: rng.range(0.5, 1.7) * ss,
                 radius: 0.25 * ss as f64,
-                burn: if water { 0.0 } else { rng.range(3.0, 14.0) },
-                char: if water { rng.range(0.0, 0.08) } else { rng.range(0.2, 0.8) },
+                burn: if ignited { rng.range(3.0, 14.0) } else { 0.0 },
+                char: if ignited { rng.range(0.2, 0.8) } else { rng.range(0.0, 0.08) },
                 resting: false,
                 sunk: false,
                 tear: [Tear::NONE; 2],
@@ -429,6 +450,7 @@ impl Crash {
             water: imp.water,
             time: 0.0,
             power,
+            ignited,
             debris,
             fires: Vec::new(),
             pending: Vec::new(),
@@ -453,20 +475,23 @@ impl Crash {
             foam: Vec::new(),
             steep: (-vn / imp.vel.length().max(1.0)).clamp(0.0, 1.0) as f32,
         };
-        // One explosion: all the fuel goes at once (into the water, one splash).
-        c.pending.push(Blast { at: 0.0, pos: if water { Vec3::ZERO } else { up.as_vec3() * 2.5 }, power });
-        if heavy && !water {
+        // Fuel ignites only when the impact ruptures a tank or carries enough
+        // energy to make ignition plausible; ditching never makes a fireball.
+        if ignited {
+            c.pending.push(Blast { at: 0.0, pos: up.as_vec3() * 2.5, power: fire_power });
+        }
+        if heavy && ignited {
             // An airliner's tanks do not all go at once: what is left in the
             // wings bursts as they break up and tumble on.
-            c.pending.push(Blast { at: c.rng.range(0.35, 0.9) as f64, pos: Vec3::NAN, power: power * 0.55 });
-            c.pending.push(Blast { at: c.rng.range(1.3, 2.6) as f64, pos: Vec3::NAN, power: power * 0.4 });
+            c.pending.push(Blast { at: c.rng.range(0.35, 0.9) as f64, pos: Vec3::NAN, power: fire_power * 0.55 });
+            c.pending.push(Blast { at: c.rng.range(1.3, 2.6) as f64, pos: Vec3::NAN, power: fire_power * 0.4 });
         }
-        if !water {
+        if ignited {
             let big = if heavy { size.powf(0.75) } else { 1.0 };
-            c.scorch.push((Vec3::ZERO, 12.0 * power * big));
+            c.scorch.push((Vec3::ZERO, 12.0 * fire_power * big));
             // What is left in the tanks burns on where the wreck came to rest
             // (the source of the smoke column).
-            c.fires.push(Fire { pos: up.as_vec3() * 0.3, life: if heavy { 85.0 } else { 70.0 }, size: 1.25 * power * if heavy { size.powf(0.8) } else { 1.0 }, acc: 0.0 });
+            c.fires.push(Fire { pos: up.as_vec3() * 0.3, life: if heavy { 85.0 } else { 70.0 }, size: 1.25 * fire_power * if heavy { size.powf(0.8) } else { 1.0 }, acc: 0.0 });
         }
         c
     }
@@ -1130,7 +1155,7 @@ impl Crash {
 
         // The main smoke column over the site.
         let col_life = 75.0;
-        if self.time < col_life && self.domain.is_none() && !self.water {
+        if self.time < col_life && self.domain.is_none() && self.ignited {
             let k = (1.0 - (self.time / col_life) as f32).powf(0.6);
             self.column_acc += 11.0 * k * dtf * self.power.sqrt();
             while self.column_acc >= 1.0 {
@@ -1207,6 +1232,19 @@ impl Crash {
         let burning = self.debris.iter().filter(|d| d.burn > 0.0 && !d.sunk && d.group.is_some()).count() as f32;
         let glow = (burning * 1.3 + self.fires.len().min(12) as f32 * 0.5) * (0.8 + 0.2 * ((self.time * 23.0).sin() * (self.time * 7.1).cos()) as f32);
         flash + glow
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crash_ignition_chance;
+
+    #[test]
+    fn crash_fire_depends_on_fuel_and_impact_severity() {
+        assert_eq!(crash_ignition_chance(1.0, 0.5 * 8.0 * 8.0, 0.0, false), 0.0);
+        assert_eq!(crash_ignition_chance(0.0, 10_000.0, 1.0, true), 0.0);
+        assert!(crash_ignition_chance(1.0, 0.5 * 70.0 * 70.0, 1.0, false) > 0.99);
+        assert!((crash_ignition_chance(1.0, 10_000.0, 0.0, true) - 0.95).abs() < 1e-6);
     }
 }
 
@@ -1343,8 +1381,11 @@ fn rigid_step(d: &mut Debris, dt: f64, world: &World, ignore: &[(geo::TileId, us
         }
         if touching {
             d.pos += upw * deepest.min(1.5) * 0.6;
-            // Crumpling and scraping soak up its spin.
-            d.omega *= 1.0 - (0.6 * h).min(0.5);
+            // Crumpling and scraping soak up its spin, the more the deeper it
+            // digs in (a rate, so it is the same at any frame rate; the
+            // impulses above already take out its speed into the ground and
+            // along it).
+            d.omega *= (-(0.9 + 6.0 * deepest.min(0.5)) * h).exp();
         }
         if touching && d.vel.length() < 0.4 && d.omega.length() < 0.25 {
             d.still += h as f32;

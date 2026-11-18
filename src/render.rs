@@ -40,7 +40,11 @@ const VOL_CELLS: u64 = (VOL_N[0] * VOL_N[1] * VOL_N[2]) as u64;
 const UB_ALIGN: u64 = 256;
 const MAX_TILES: u64 = 1024;
 const MAX_BUILDS: u64 = 512; // detail tiles; one extra slot is kept for loose trees
-const MAX_OBJS: u64 = 256;
+/// Bytes between objects' uniforms: two dynamic-offset alignments, as `ObjU`
+/// outgrew one when the aircraft's dent and wing bending were added.
+const OBJ_STRIDE: u64 = 2 * UB_ALIGN;
+/// pieces of aircraft (ours, wreckage, the other players') drawn in a frame
+pub const MAX_OBJS: u64 = 1024;
 /// airfields drawn at once, and lights on moving things (aircraft)
 pub const MAX_FIELDS: usize = 8;
 pub const MAX_DYN_LIGHTS: usize = 8192;
@@ -524,7 +528,12 @@ struct ObjU {
     tear: [[f32; 4]; 2],
     dmg: [f32; 4],
     dmg2: [f32; 4],
+    crumple: [f32; 4],
+    crumple_dir: [f32; 4],
+    pose: [[f32; 4]; 3],
+    flex: [f32; 4],
 }
+const _: () = assert!(std::mem::size_of::<ObjU>() <= OBJ_STRIDE as usize);
 
 /// An airfield's pavement and lights on the GPU.
 pub struct FieldGpu {
@@ -733,10 +742,20 @@ pub struct DrawObj {
     pub dmg: [f32; 4],
     /// oil film on the windshield, crack centre z and y, crack size
     pub dmg2: [f32; 4],
+    /// a lasting dent (damage.rs `crumple`): its centre (body frame) and radius (m)
+    pub crumple: [f32; 4],
+    /// the dent's push direction into the airframe (body frame) and depth (m)
+    pub crumple_dir: [f32; 4],
+    /// the top three rows of the piece's pose (mesh frame to body frame), so
+    /// the dent and the wing bending can be worked out in the body frame
+    pub pose: [[f32; 4]; 3],
+    /// wing bending: tip deflection over the half-span squared (1/m), 0 for
+    /// anything that is not part of a wing
+    pub flex: f32,
 }
 
 impl DrawObj {
-    pub const DEFAULT: DrawObj = DrawObj { mesh: 0, model: Mat4::IDENTITY, tint: [0.0; 4], glow: [0.0; 4], params: [[0.0; 4]; 6], cast: 0, glass: false, cut: false, tear: [[0.0; 4]; 2], dmg: [0.0; 4], dmg2: [0.0; 4] };
+    pub const DEFAULT: DrawObj = DrawObj { mesh: 0, model: Mat4::IDENTITY, tint: [0.0; 4], glow: [0.0; 4], params: [[0.0; 4]; 6], cast: 0, glass: false, cut: false, tear: [[0.0; 4]; 2], dmg: [0.0; 4], dmg2: [0.0; 4], crumple: [0.0; 4], crumple_dir: [0.0; 4], pose: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]], flex: 0.0 };
 }
 
 pub struct Frame<'a> {
@@ -2189,7 +2208,7 @@ impl Renderer {
 
         // ---- per-draw uniform pools
         let pool = |label: &str, n: u64| d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: n * UB_ALIGN, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let (tile_ub, build_ub, obj_ub, casc_ub) = (pool("tiles", MAX_TILES), pool("builds", MAX_BUILDS + 1 + MAX_FIELDS as u64), pool("objs", MAX_OBJS), pool("cascades", CASCADES as u64 + 4));
+        let (tile_ub, build_ub, obj_ub, casc_ub) = (pool("tiles", MAX_TILES), pool("builds", MAX_BUILDS + 1 + MAX_FIELDS as u64), pool("objs", MAX_OBJS * OBJ_STRIDE / UB_ALIGN), pool("cascades", CASCADES as u64 + 4));
         let photo_ub = pool("photo tiles", MAX_PHOTO);
         let bg_tileu = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &l_tileu, entries: &[buf_res(0, &build_ub, 48)] });
         let bg_casc = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &l_casc, entries: &[buf_res(0, &casc_ub, 64)] });
@@ -2837,10 +2856,11 @@ impl Renderer {
         let n_near = f.near.len().min(MAX_NEAR);
         q.write_buffer(&self.near_buf, 0, bytemuck::cast_slice(&f.near[..n_near]));
         let loose_slot = n_builds as u32 * 256;
-        let mut blob = vec![0u8; n_objs * UB_ALIGN as usize];
+        let stride = OBJ_STRIDE as usize;
+        let mut blob = vec![0u8; n_objs * stride];
         for (i, o) in f.objs.iter().take(n_objs).enumerate() {
-            let u = ObjU { model: o.model.to_cols_array_2d(), tint: o.tint, glow: o.glow, params: o.params, tear: o.tear, dmg: o.dmg, dmg2: o.dmg2 };
-            blob[i * 256..i * 256 + std::mem::size_of::<ObjU>()].copy_from_slice(bytemuck::bytes_of(&u));
+            let u = ObjU { model: o.model.to_cols_array_2d(), tint: o.tint, glow: o.glow, params: o.params, tear: o.tear, dmg: o.dmg, dmg2: o.dmg2, crumple: o.crumple, crumple_dir: o.crumple_dir, pose: o.pose, flex: [o.flex, 0.0, 0.0, 0.0] };
+            blob[i * stride..i * stride + std::mem::size_of::<ObjU>()].copy_from_slice(bytemuck::bytes_of(&u));
         }
         q.write_buffer(&self.obj_ub, 0, &blob);
 
@@ -3153,7 +3173,7 @@ impl Renderer {
                 if m.n_idx == 0 {
                     continue;
                 }
-                rp.set_bind_group(1, m.bind.as_deref().unwrap_or(&self.bg_obj), &[i as u32 * 256]);
+                rp.set_bind_group(1, m.bind.as_deref().unwrap_or(&self.bg_obj), &[(i as u64 * OBJ_STRIDE) as u32]);
                 rp.set_vertex_buffer(0, m.vbuf.slice(..));
                 rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 // the lean shader for the kind flown, the full one for the instruments.
@@ -3315,7 +3335,7 @@ impl Renderer {
                 if m.n_idx == 0 {
                     continue;
                 }
-                rp.set_bind_group(1, m.bind.as_deref().unwrap_or(&self.bg_obj), &[i as u32 * 256]);
+                rp.set_bind_group(1, m.bind.as_deref().unwrap_or(&self.bg_obj), &[(i as u64 * OBJ_STRIDE) as u32]);
                 rp.set_vertex_buffer(0, m.vbuf.slice(..));
                 rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..m.n_idx, 0, 0..1);
@@ -3540,7 +3560,7 @@ impl Renderer {
                 if m.n_idx == 0 {
                     continue;
                 }
-                rp.set_bind_group(1, m.bind.as_deref().unwrap_or(&self.bg_obj), &[i as u32 * 256]);
+                rp.set_bind_group(1, m.bind.as_deref().unwrap_or(&self.bg_obj), &[(i as u64 * OBJ_STRIDE) as u32]);
                 rp.set_vertex_buffer(0, m.vbuf.slice(..));
                 rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..m.n_idx, 0, 0..1);

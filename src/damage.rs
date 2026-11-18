@@ -134,6 +134,10 @@ pub struct Damage {
     pub fatigue: f32,
     pub flutter: f32,
     pub flap_stress: f32,
+    /// Persistent soft-body dent: body-frame impact center and support radius (m).
+    pub crumple: [f32; 4],
+    /// Direction the impact pushed into the airframe (xyz) and plastic dent depth (m).
+    pub crumple_dir: [f32; 4],
 }
 
 impl Damage {
@@ -163,6 +167,8 @@ impl Damage {
             fatigue: 0.0,
             flutter: 0.0,
             flap_stress: 0.0,
+            crumple: [0.0; 4],
+            crumple_dir: [0.0; 4],
         }
     }
 }
