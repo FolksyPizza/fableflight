@@ -252,7 +252,6 @@ fn breakers(wc: vec2f, sh: ShoreAt, wclass: f32, fp: f32, t: f32) -> Surf {
 
 fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> vec3f {
   // Keep the water parameters in their physical ranges.
-  let wd = max(aux.x, 0.0);
   let wclass = clamp(aux.y, 0.0, 3.0);
   let shore = clamp(aux.z, 0.0, 1.0);
   var l = light_at(P);
@@ -286,7 +285,17 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   st.z *= mix(0.3, 1.2, ruffle);
   st.y *= mix(0.8, 1.1, ruffle);
   // Breakers along the shore, from the distance to it.
-  let surf = breakers(wc, shore_at(P), wclass, fp, t);
+  let coast = shore_at(P);
+  let surf = breakers(wc, coast, wclass, fp, t);
+  // The distance field resolves the last few metres of the waterline more
+  // finely than the terrain's bathymetry. Let the bed rise into the shallows
+  // instead of leaving a flat band of deep water along lakes and beaches.
+  let mapped_depth = max(aux.x, 0.0);
+  let shelf = 0.12 + coast.d0 * select(0.065, 0.095, wclass > 1.5);
+  let coast_blend = coast.w * (1.0 - smoothstep(10.0, 42.0, coast.d0));
+  let wd = mix(mapped_depth, min(mapped_depth, shelf), coast_blend);
+  st.x *= mix(1.0, smoothstep(0.0, 3.0, wd), coast.w);
+  st.y *= mix(1.0, smoothstep(0.0, 1.1, wd), coast.w);
 
   // The FFT ocean (ocean.wgsl). This pixel is where the sideways shift
   // carried a surface point to: find that point first (two fixed-point steps

@@ -862,7 +862,8 @@ struct Loading {
 impl Loading {
     const MIN: f64 = 1.2;
     const PHOTO_WAIT: f64 = 45.0;
-    const DESCENT: f64 = 5.6;
+    const DESCENT: f64 = 6.2;
+    const SCENERY_VIEWS: [f64; 8] = [0.0, 0.18, 0.30, 0.42, 0.53, 0.65, 0.78, 0.90];
 
     fn new(eye: DVec3) -> Self {
         Self { t0: Instant::now(), quiet_since: None, descent: None, descent_time: 0.0, eye }
@@ -1991,7 +1992,7 @@ impl Game {
         let photo = self.world.photo();
         let (lat, lon, _) = geo::pos_to_lla(self.plane.pos);
         let t = now.saturating_duration_since(l.t0).as_secs_f64();
-        if l.try_begin_descent(now, self.world.departure_ready(lat, lon), !photo.active || photo.stats.2 == 0) {
+        if l.try_begin_descent(now, self.departure_terrain >= 1.0 && self.world.departure_ready(lat, lon), !photo.active || photo.stats.2 == 0) {
             log::info!("Departure scenery prepared in {t:.1}s");
         }
     }
@@ -2029,7 +2030,8 @@ impl Game {
             |i| f64::from(airports::Db::get().apts[i as usize].elev),
         );
         let start_agl = if self.menu.airport.is_none() || self.menu.start == menu::Start::Overhead { self.menu.start_agl } else { 450.0 };
-        let height = (ground + start_agl + 3_000.0).max(7_500.0).max(f64::from(self.wx.cloud_ceiling()) + 850.0);
+        let survey = (ground + start_agl + 4_000.0).max(8_000.0);
+        let height = (f64::from(self.wx.cloud_ceiling()) + 800.0).clamp(survey, survey + 3_500.0);
         geo::lla_to_pos(lat, lon, height)
     }
 
@@ -3770,13 +3772,13 @@ impl Game {
         self.status_until = self.real + 3.0;
     }
 
-    /// Back to the globe, looking at where we were.
+    /// Return to the flight planner with a fresh globe view.
     fn to_globe(&mut self) {
         self.set_pause_menu(false);
         self.set_flight_tools(false);
         self.flight_ended = None;
-        let (lat, lon, _) = geo::pos_to_lla(self.plane.pos);
-        self.menu.look_at(lat.to_degrees(), lon.to_degrees(), 60_000.0);
+        self.menu.reset_globe(self.utc);
+        self.menu.search.clear();
         self.menu.pick = None;
         self.menu.pick_name.clear();
         self.menu.airport = None;
@@ -3784,7 +3786,9 @@ impl Game {
         if self.remember_start {
             self.restore_last_start();
         }
-        self.menu.hour = (self.utc + lon.to_degrees() / 15.0).rem_euclid(24.0);
+        let lon = self.menu.pick.map_or(self.menu.lon, |(_, lon)| lon);
+        self.menu.hour = (self.utc + lon / 15.0).rem_euclid(24.0);
+        self.menu_time_seen = (self.menu.hour, self.doy);
         self.menu.starting = false;
         self.menu.screen = menu::Screen::Fly;
         self.mode = Mode::Menu;
@@ -5202,6 +5206,12 @@ impl Game {
         }
         let flight_camera = (cam, dir, upv, fov);
         let preparing = self.loading.is_some_and(|l| l.descent.is_none());
+        let departure_visibility = if departing {
+            self.loading.and_then(Loading::progress)
+                .map_or(0.0, |p| Loading::ease((p - 0.24) / 0.52) as f32)
+        } else {
+            Loading::ease((self.real - self.flight_ui_since) / 0.38) as f32
+        };
         let (cam, dir, upv) = if let Some(intro) = &self.departure_intro {
             let eye = intro.camera();
             let (_, north, up) = geo::enu(eye);
@@ -5277,23 +5287,18 @@ impl Game {
             };
             let departure_views = self.loading.filter(|_| preparing).map(|l| {
                 let (eye, dir, up, final_fov) = flight_camera;
-                [0.0, 0.25, 0.42, 0.60, 0.76].map(|t| {
+                Loading::SCENERY_VIEWS.map(|t| {
                     let (cam, direction, up) = l.camera(t, eye, dir, up, self.cam_mode == 1);
                     let fov = 60f32.to_radians() + (final_fov - 60f32.to_radians()) * Loading::ease(t) as f32;
-                    let vp = perspective_rev(fov, w / h, flight_near) * look_to(Vec3::ZERO, direction.as_vec3(), up.as_vec3());
+                    // Cover the views between the samples, plus a margin at the image edge.
+                    let buffered_fov = (fov + 12f32.to_radians()).min(150f32.to_radians());
+                    let vp = perspective_rev(buffered_fov, w / h, flight_near) * look_to(Vec3::ZERO, direction.as_vec3(), up.as_vec3());
                     (cam, world::Frustum::new(DMat4::from_cols_array(&vp.to_cols_array().map(f64::from))))
                 })
             });
             let airport = if preparing { self.menu.airport } else { None };
-            let current_view = (cam, frustum.clone());
-            let views = if let Some(views) = &departure_views {
-                &views[..]
-            } else if loading {
-                std::slice::from_ref(&current_view)
-            } else {
-                &[]
-            };
-            self.world.update(&self.r, stream_cam, &stream_frustum, views, airport);
+            let views = departure_views.as_ref().map_or(&[][..], |views| &views[..]);
+            self.world.update(&self.r, stream_cam, &stream_frustum, views, loading && !preparing, airport);
             let day = if in_menu { 0.0 } else { 1.0 };
             let px = h as f64 / (2.0 * (stream_fov as f64 * 0.5).tan());
             self.world.update_photo(&self.r, stream_cam, focus_abs, &stream_frustum, px, day, dt_real);
@@ -5302,9 +5307,9 @@ impl Game {
             }
         }
         if waiting_above && !distant_intro {
-            let local_terrain = self.world.ground_zoom(clat, clon).is_some_and(|z| z >= self.world.max_zoom.min(9));
-            if local_terrain {
-                self.departure_terrain = (self.departure_terrain + dt_real as f32 / 0.38).min(1.0);
+            let (lat, lon, _) = geo::pos_to_lla(self.plane.pos);
+            if self.loading.is_some() && self.world.departure_ready(lat, lon) {
+                self.departure_terrain = (self.departure_terrain + dt_real as f32 / 0.55).min(1.0);
             }
         } else if !departing {
             self.departure_terrain = 1.0;
@@ -5444,7 +5449,7 @@ impl Game {
             shore: [0.0; 4],
             foam: [[0.0; 4]; 16],
             // (yzw: the rain, how wet the windows are, and the airspeed over them in kt; plane.wgsl rain_water)
-            start: [if map_view || distant_intro { 1.0 } else if departing { -1.0 } else { 0.0 }, self.wx.rain, self.glass.wet, (self.plane.ias() * 1.94384) as f32],
+            start: [if map_view || distant_intro { 1.0 } else { departure_visibility - 1.0 }, self.wx.rain, self.glass.wet, (self.plane.ias() * 1.94384) as f32],
             stormfx: [0.0; 4],
             flash: [[0.0; 4]; 2 * storm::MAX_FLASHES],
             rain: [[0.0; 4]; 2],
@@ -5713,12 +5718,18 @@ impl Game {
 
         // The globe's labels are placed in the window's pixels, not the (maybe smaller) 3D scene's.
         let (ww, wh) = (self.r.config.width as f32, self.r.config.height as f32);
+        let landing_guide = if !in_menu && !departing { self.landing_guide() } else { None };
+        let approach_lines = if self.hud_on() && !self.pause_open && !self.plane.on_ground {
+            landing_guide.as_ref().map_or_else(Vec::new, |guide| guide.world_lines(cam, self.plane.pos, self.plane.forward()))
+        } else {
+            Vec::new()
+        };
         let ui = if departing {
             self.departure_ui()
         } else if in_menu {
             self.menu_ui(vp, cam, ww, wh)
         } else {
-            let (mut jobs, delta, scale) = self.ui(agl);
+            let (mut jobs, delta, scale) = self.ui(agl, landing_guide.as_ref());
             let opacity = Loading::ease((self.real - self.flight_ui_since) / 0.38) as f32;
             if opacity < 1.0 {
                 flightui::fade_meshes(&mut jobs, opacity);
@@ -5798,8 +5809,8 @@ impl Game {
         if !in_menu {
             self.lightning.segments(cam, dt, &mut bolts);
         }
-        let rain_drops = if in_menu || self.cam_rain < 0.002 { 0 } else { render::RAIN_DROPS };
-        self.r.render(Frame { rain_drops, bolts, g, tiles, tess, details, photo, skins, skin_slots, fields, lights: air_lights, objs, insts, fall, near, casc_vp, shore: sf.step, shore_c, shore_tiles, psim, sim_steps: dt > 0.0, fluid, ocean: self.world.water_in_view().then(|| self.world.ocean.uniform()), egui: Some(ui), shot, logo: (map_view && self.menu.screen == menu::Screen::Main).then(|| self.egui_ctx.pixels_per_point()), cover, glow: glow_px });
+        let rain_drops = if in_menu || departure_visibility < 0.8 || self.cam_rain < 0.002 { 0 } else { render::RAIN_DROPS };
+        self.r.render(Frame { rain_drops, bolts, approach_lines, g, tiles, tess, details, photo, skins, skin_slots, fields, lights: air_lights, objs, insts, fall, near, casc_vp, shore: sf.step, shore_c, shore_tiles, psim, sim_steps: dt > 0.0, fluid, ocean: self.world.water_in_view().then(|| self.world.ocean.uniform()), egui: Some(ui), shot, logo: (map_view && self.menu.screen == menu::Screen::Main).then(|| self.egui_ctx.pixels_per_point()), cover, glow: glow_px });
         self.finish_mcp_shots();
         if (had_shots && std::env::args().any(|a| a == "--shot") && self.record.is_none()) || rec_done {
             self.quit = true;
@@ -5813,8 +5824,8 @@ impl Game {
         let mut start = false;
         let mut jump: Option<(f64, f64, &'static str)> = None;
         let mut airport: Option<u32> = None;
-        let alt = self.menu.alt;
-        self.src.google.update_attribution(self.menu.lat, self.menu.lon, alt);
+        let (lat, lon, alt) = geo::pos_to_lla(cam);
+        self.src.google.update_attribution(lat.to_degrees(), lon.to_degrees(), alt);
         let out = self.egui_ctx.clone().run_ui(raw, |root| {
             let ctx = &root.ctx().clone();
             self.pad_pass(ctx);
@@ -5907,9 +5918,9 @@ impl Game {
             if let Some((lat, lon)) = self.menu.pick {
                 if let Some(p) = project(lat, lon) {
                     let accent = menu::ACCENT;
-                    let pulse = 11.0 + 3.0 * (self.real * 3.0).sin() as f32;
-                    painter.circle_stroke(p, pulse, egui::Stroke::new(2.0, accent));
-                    painter.circle_filled(p, 3.5, accent);
+                    painter.circle_filled(p, 8.0, Color32::from_black_alpha(175));
+                    painter.circle_stroke(p, 8.0, egui::Stroke::new(1.4, accent));
+                    painter.circle_filled(p, 2.5, accent);
                     let name = self.menu.airport.map(|i| airports::Db::get().apts[i as usize].ident.clone());
                     label(p + egui::vec2(18.0, 0.0), &name.unwrap_or_else(|| t!("Start here", "Départ ici").to_string()), 16.0, accent);
                 }
@@ -5970,6 +5981,7 @@ impl Game {
             // Scroll the whole panel if its pinned section cannot fit.
             let body_h = available - 78.0 - foot_h;
             let scroll_panel = body_h < 104.0;
+            let selection_height = if self.menu.pick.is_some() && available > 138.0 { 22.0 } else { 0.0 };
             let body_h = if scroll_panel { f32::INFINITY } else { body_h };
             egui::Area::new(egui::Id::unique("menu")).fixed_pos(egui::pos2(M, top)).constrain(false).show(ctx, |ui| {
                 ui.set_width(W);
@@ -6123,13 +6135,28 @@ impl Game {
                     ctx.data_mut(|d| d.insert_temp(foot_id, ui.cursor().top() - pin_top + separate_action));
                 });
                 if scroll_panel {
-                    let scroll_height = (available - 68.0).max(1.0);
+                    let scroll_height = (available - 68.0 - selection_height).max(1.0);
                     egui::ScrollArea::vertical().max_height(scroll_height).auto_shrink([false, true]).show(ui, |ui| {
                         location(ui);
                         padui::follow_focus(ui);
                     });
                     menu::panel().inner_margin(egui::Margin::symmetric(16, 7)).show(ui, |ui| {
                         ui.set_width(W - 32.0);
+                        if selection_height > 0.0 {
+                            let summary = if let Some(i) = self.menu.airport {
+                                let code = airports::Db::get().apts[i as usize].code();
+                                let start = match (self.menu.start, self.menu.runway.as_deref()) {
+                                    (menu::Start::Overhead, _) => t!("Overhead", "Au-dessus").to_string(),
+                                    (menu::Start::Approach, Some(runway)) => t!("Final {}", "Finale {}", runway),
+                                    (menu::Start::Runway, Some(runway)) => t!("Runway {}", "Piste {}", runway),
+                                    (_, None) => t!("Runway selected by wind", "Piste selon le vent").to_string(),
+                                };
+                                format!("{code}  ·  {start}")
+                            } else {
+                                self.menu.pick.map_or_else(String::new, |(lat, lon)| menu::latlon(lat, lon))
+                            };
+                            ui.add(egui::Label::new(RichText::new(summary).font(menu::data()).color(TEXT)).truncate());
+                        }
                         start |= self.start_flight_button(ui);
                     });
                 } else {
@@ -6823,6 +6850,21 @@ impl Game {
         Some(out)
     }
 
+    fn landing_guide(&self) -> Option<approach::Guide> {
+        if !self.minimap.landing_guidance || self.crashed || self.flight_ended.is_some() {
+            return None;
+        }
+        let field = self.world.airfield_near(self.plane.pos, 18_000.0)?;
+        let g = &field.geo;
+        let selected = self.menu.runway.as_deref().filter(|_| self.menu.airport == Some(g.idx))
+            .and_then(|ident| g.runways.iter().enumerate().find_map(|(i, runway)| {
+                runway.ident.iter().position(|end| airports::norm_ident(end) == airports::norm_ident(ident)).map(|end| (i, end))
+            }));
+        let (runway, end) = selected.or(field.traffic.active)
+            .or_else(|| g.active(self.wx.wind_from as f32, (self.wx.wind * 1.94384) as f32))?;
+        Some(approach::Guide::new(g, runway, end))
+    }
+
     fn primary_flight_warning(&self) -> Option<&'static str> {
         if self.crashed || !self.show_hud {
             None
@@ -7129,7 +7171,7 @@ impl Game {
         });
     }
 
-    fn ui(&mut self, agl: f64) -> (Vec<egui::ClippedPrimitive>, egui::TexturesDelta, f32) {
+    fn ui(&mut self, agl: f64, landing_guide: Option<&approach::Guide>) -> (Vec<egui::ClippedPrimitive>, egui::TexturesDelta, f32) {
         let raw = self.egui_input();
         let (lat, lon, alt) = geo::pos_to_lla(self.plane.pos);
         let (e, n, u) = geo::enu(self.plane.pos);
@@ -7146,13 +7188,6 @@ impl Game {
         let mut act = None;
         let mut bar: Option<flightui::Bar> = None;
         let airport_hud = self.airport_hud();
-        let landing_guide = if self.minimap.landing_guidance && !self.crashed {
-            self.world.airfield_near(self.plane.pos, 18_000.0).and_then(|field| {
-                let g = &field.geo;
-                field.traffic.active.or_else(|| g.active(self.wx.wind_from as f32, (self.wx.wind * 1.94384) as f32))
-                    .map(|(runway, end)| approach::Guide::new(g, runway, end))
-            })
-        } else { None };
         self.src.google.update_attribution(lat.to_degrees(), lon.to_degrees(), agl);
         self.flash.retain(|(_, t)| self.real - t < 4.0);
         let out = self.egui_ctx.clone().run_ui(raw, |root| {
@@ -7280,11 +7315,6 @@ impl Game {
                             painter.text(pos, Align2::CENTER_TOP, &line, FontId::monospace(12.0), col);
                         }
                     }
-                }
-            }
-            if self.hud_on() && !self.pause_open && !self.plane.on_ground {
-                if let (Some(guide), Some((vp, camera))) = (&landing_guide, self.live_view) {
-                    guide.draw_world(ctx, vp, camera, self.plane.pos);
                 }
             }
             // Google's imagery has to carry its credit, HUD or not.
@@ -7427,7 +7457,7 @@ impl Game {
                 if self.minimap.visible {
                     let horizontal = f.dot(e).hypot(f.dot(n));
                     let width = self.flight_view_width(ctx);
-                    self.minimap.show(ctx, &self.src, lat, lon, (horizontal > 1e-5).then_some(hdg.to_radians()), width, landing_guide.as_ref(), &self.world);
+                    self.minimap.show(ctx, &self.src, lat, lon, (horizontal > 1e-5).then_some(hdg.to_radians()), width, landing_guide, &self.world);
                 }
             }
             if self.show_help {

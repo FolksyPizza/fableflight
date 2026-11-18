@@ -781,19 +781,29 @@ impl Weather {
         (e * to.sin() + n * to.cos()) * self.wind * (agl.max(2.0) / 10.0).powf(1.0 / 7.0).min(2.0)
     }
 
-    /// Wind with gusts at a point and time: a few incommensurate swells per
-    /// axis, so it never quite repeats; the vertical part is weaker.
+    /// Wind with gusts that travel downwind. Nearby aircraft share the same
+    /// air motion, while locations further apart see different phases.
     pub fn at(&self, pos: DVec3, agl: f64, t: f64) -> DVec3 {
         let base = self.steady(pos, agl);
         if self.gusts <= 0.0 {
             return base;
         }
-        let swell = |k: f64| ((0.53 * t + k).sin() * 0.6 + (1.37 * t + 2.1 * k).sin() * 0.45 + (3.1 * t + 3.7 * k).sin() * 0.3 + (7.9 * t + 5.3 * k).sin() * 0.15) / 0.85;
+        let (_, north, up) = geo::enu(pos);
+        let direction = base.try_normalize().unwrap_or(north);
+        let across = direction.cross(up);
+        // Fixed planet-space axes keep the field continuous across map tiles.
+        let phase = pos.dot(DVec3::new(0.0032, 0.0026, -0.0021));
+        let detail = pos.dot(DVec3::new(-0.006, 0.0045, 0.0068));
+        let advection = base.dot(DVec3::new(0.0032, 0.0026, -0.0021));
+        let sweep = phase + t * (0.28 - advection);
+        let ripple = detail + t * 0.86;
         let sigma = self.gusts * (1.0 + 0.35 * self.wind);
-        let (e, n, u) = geo::enu(pos);
-        // Gusts die out in the still air close to the ground.
-        let near = (agl / 30.0).clamp(0.2, 1.0);
-        base + (e * swell(0.0) + n * swell(1.9) + u * swell(4.3) * 0.5) * sigma * near
+        // Surface friction damps gusts at wheel height and vertical gusts more strongly.
+        let near = smoothstep(0.0, 42.0, agl);
+        let along_wind = (sweep.sin() * 0.74 + (ripple + 0.4).sin() * 0.34) * (0.28 + 0.72 * near);
+        let across_wind = ((1.3 * sweep + 1.9).sin() * 0.50 + (1.9 * ripple).sin() * 0.24) * (0.24 + 0.76 * near);
+        let vertical = (ripple - 0.5 * sweep).sin() * 0.36;
+        base + (direction * along_wind + across * across_wind + up * vertical * near) * sigma
     }
 
     /// Carry the clouds along with the wind aloft (about twice the surface wind),
@@ -1438,6 +1448,19 @@ mod tests {
         w.set_live_cells(&[(a, 8.0, 2.0, 0.0)], true);
         let c = w.storm_cells(cam);
         assert!(c.iter().any(|c| supercell(c) == 1.0), "{c:?}");
+    }
+
+    #[test]
+    fn gusts_vary_by_location_and_damp_below_the_boundary_layer() {
+        let mut weather = Weather::new(0.0);
+        weather.gusts = 0.8;
+        let p = geo::lla_to_pos(0.48, -1.1, 80.0);
+        let east = geo::enu(p).0;
+        let gust = |pos, agl| weather.at(pos, agl, 30.0) - weather.steady(pos, agl);
+        let local = gust(p, 80.0);
+        assert!(local.distance(gust(p + east, 80.0)) < 0.05);
+        assert!(local.distance(gust(p + east * 900.0, 80.0)) > 0.2);
+        assert!(gust(p, 0.0).dot(p.normalize()).abs() < 1e-9);
     }
 
     #[test]

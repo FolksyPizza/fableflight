@@ -744,22 +744,33 @@ impl Game {
                         self.binds.axes.remove(&a);
                     }
                 });
-                ui.horizontal(|ui| {
-                    // (0 until the axis has moved since the game started)
-                    if let Some(v) = self.binds.axis(a).or_else(|| self.binds.axes.contains_key(&a).then_some(0.0)) {
-                        let f = if a.centred() { (v as f32 + 1.0) * 0.5 } else { v as f32 };
-                        ui.add(egui::ProgressBar::new(f).desired_width(64.0).desired_height(6.0));
-                    }
-                    // The dead zone: round the centre, or at the idle end of a throttle or brake.
-                    if let Some(b) = self.binds.axes.get_mut(&a) {
-                        ui.spacing_mut().slider_width = 70.0;
-                        ui.add(egui::Slider::new(&mut b.dead, 0.0..=0.3).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)))
-                            .on_hover_text(t!("Dead zone: how much travel does nothing", "Zone morte : la course qui ne fait rien"));
-                        // The sign is learnt when binding; this flips it.
-                        let mut inv = b.sign < 0.0;
-                        if menu::toggle(ui, &mut inv, t!("Invert", "Inverser")).changed() {
-                            b.sign = -b.sign;
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        // (0 until the axis has moved since the game started)
+                        if let Some(v) = self.binds.axis(a).or_else(|| self.binds.axes.contains_key(&a).then_some(0.0)) {
+                            let f = if a.centred() { (v as f32 + 1.0) * 0.5 } else { v as f32 };
+                            ui.add(egui::ProgressBar::new(f).desired_width(64.0).desired_height(6.0));
                         }
+                        // The dead zone: round the centre, or at the idle end of a throttle or brake.
+                        if let Some(b) = self.binds.axes.get_mut(&a) {
+                            ui.spacing_mut().slider_width = 70.0;
+                            ui.add(egui::Slider::new(&mut b.dead, 0.0..=0.3).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)))
+                                .on_hover_text(t!("Dead zone: how much travel does nothing", "Zone morte : la course qui ne fait rien"));
+                            // The sign is learnt when binding; this flips it.
+                            let mut inv = b.sign < 0.0;
+                            if menu::toggle(ui, &mut inv, t!("Invert", "Inverser")).changed() {
+                                b.sign = -b.sign;
+                            }
+                        }
+                    });
+                    if a.centred() && let Some(binding) = self.binds.axes.get_mut(&a) {
+                        ui.horizontal(|ui| {
+                            ui.label(t!("Curve", "Courbe"));
+                            ui.spacing_mut().slider_width = 86.0;
+                            ui.add(egui::Slider::new(&mut binding.curve, 0.0..=0.85)
+                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)))
+                                .on_hover_text(t!("Higher values give finer control near center and still allow full travel.", "Une courbe plus élevée affine le contrôle près du centre et conserve toute la course."));
+                        });
                     }
                 });
                 ui.end_row();

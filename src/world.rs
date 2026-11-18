@@ -253,6 +253,7 @@ pub struct World {
     draw_shore: Vec<TileId>,
     draw_b: Vec<TileId>,
     wanted: Vec<(f32, TileId)>,
+    scenery_candidates: HashMap<TileId, f32>,
     in_view: Vec<bool>,
     frustum: Option<Frustum>,
     /// (centre, radius) of the most recent craters
@@ -286,7 +287,7 @@ impl Frustum {
 impl World {
     pub fn new(loader: Loader, max_zoom: u8) -> Self {
         let photo = Some(Box::new(crate::tiles3d::Photo::new(loader.src.google.clone(), Some(loader.src.clone()))));
-        Self { photo, flat: None, loader, tiles: HashMap::default(), builds: HashMap::default(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, tessellate: true, reach_k: 1.0, city_k: 1.0, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::default(), ocean: crate::ocean::Ocean::new() }
+        Self { photo, flat: None, loader, tiles: HashMap::default(), builds: HashMap::default(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, tessellate: true, reach_k: 1.0, city_k: 1.0, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), scenery_candidates: HashMap::default(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::default(), ocean: crate::ocean::Ocean::new() }
     }
 
     /// Readiness at the current quality settings, including staged GPU uploads.
@@ -890,7 +891,7 @@ impl World {
         }
     }
 
-    pub fn update(&mut self, r: &Renderer, cam: DVec3, fr: &Frustum, departure_views: &[(DVec3, Frustum)], airport: Option<u32>) {
+    pub fn update(&mut self, r: &Renderer, cam: DVec3, fr: &Frustum, departure_views: &[(DVec3, Frustum)], descent: bool, airport: Option<u32>) {
         self.frame += 1;
         let now = std::time::Instant::now();
         let real_dt = self.last_update.map(|t| (now - t).as_secs_f32().min(0.25)).unwrap_or(0.0);
@@ -970,48 +971,38 @@ impl World {
         }
         self.select_terrain(cam, (clat, clon, calt.max(1.0), gh), fr, true);
 
-        // Buildings near the ground.
-        self.draw_b.clear();
-        self.in_view.clear();
+        // Hold the prepared building set through the descent, then resume
+        // selecting from the live flight view. No second ring of jobs mid-shot.
         self.frustum = Some(fr.clone());
-        let agl = calt - gh;
-        if self.buildings_on && agl < 7000.0 && clat.abs() < 1.45 {
-            let c = TileId::at(clat, clon, DATA_ZOOM);
-            let w = c.width_m();
-            let reach = (4500.0 + agl * 0.6).min(7500.0) * self.reach_k;
-            let n = (reach / w).ceil() as i64;
-            let size = 1i64 << DATA_ZOOM;
-            for dy in -n..=n {
-                for dx in -n..=n {
-                    let (x, y) = ((c.x as i64 + dx).rem_euclid(size), c.y as i64 + dy);
-                    if y < 0 || y >= size {
-                        continue;
-                    }
-                    let id = TileId::new(DATA_ZOOM, x as u32, y as u32);
-                    let (lat, lon) = id.lat_lon(0.5, 0.5);
-                    let d = (geo::lla_to_pos(lat, lon, gh) - cam).length();
-                    if d > reach + w {
-                        continue;
-                    }
-                    match self.builds.get_mut(&id) {
-                        Some(BSlot::Ready(b)) => {
-                            b.last_used = self.frame;
-                            // Detail arrives gradually: the tile dissolves in, then its middle and
-                            // finest levels as the camera comes close enough for each.
-                            let dist = ((b.center - cam).length() - b.radius) as f32;
-                            b.shown += real_dt;
-                            // Towers carry their detail farther (buildings::HCLASS).
-                            let (mid, fine) = (LOD_MID * b.tall * self.city_k, LOD_FINE * b.tall * self.city_k);
-                            b.mid_t = if dist < mid { b.mid_t + real_dt } else if dist > mid * 1.1 { 0.0 } else { b.mid_t };
-                            b.fine_t = if dist < fine { b.fine_t + real_dt } else if dist > fine * 1.2 { 0.0 } else { b.fine_t };
-                            if b.gpu.is_some() {
-                                self.draw_b.push(id);
-                                self.in_view.push(fr.sphere(b.center - cam, b.radius));
-                            }
+        if !descent {
+            self.draw_b.clear();
+            self.in_view.clear();
+        }
+        if self.buildings_on && !descent {
+            self.scenery_candidates.clear();
+            Self::select_scenery(self.reach_k, cam, (clat, clon, calt, gh), None, &mut self.scenery_candidates);
+            for (eye, view) in departure_views {
+                let (lat, lon, alt) = geo::pos_to_lla(*eye);
+                let ground = self.terrain_ground(lat, lon).map_or(0.0, |g| g.h);
+                Self::select_scenery(self.reach_k, *eye, (lat, lon, alt, ground), Some(view), &mut self.scenery_candidates);
+            }
+            for (&id, &priority) in &self.scenery_candidates {
+                match self.builds.get_mut(&id) {
+                    Some(BSlot::Ready(b)) => {
+                        b.last_used = self.frame;
+                        let dist = ((b.center - cam).length() - b.radius) as f32;
+                        b.shown += real_dt;
+                        // Towers carry their detail farther (buildings::HCLASS).
+                        let (mid, fine) = (LOD_MID * b.tall * self.city_k, LOD_FINE * b.tall * self.city_k);
+                        b.mid_t = if dist < mid { b.mid_t + real_dt } else if dist > mid * 1.1 { 0.0 } else { b.mid_t };
+                        b.fine_t = if dist < fine { b.fine_t + real_dt } else if dist > fine * 1.2 { 0.0 } else { b.fine_t };
+                        if b.gpu.is_some() {
+                            self.draw_b.push(id);
+                            self.in_view.push(fr.sphere(b.center - cam, b.radius));
                         }
-                        Some(BSlot::Loading | BSlot::RetryAfter(_)) => {}
-                        None => self.wanted.push((0.8 + (d / w) as f32 * 0.6, id.with_tag())),
                     }
+                    Some(BSlot::Loading | BSlot::RetryAfter(_)) => {}
+                    None => self.wanted.push((priority, id.with_tag())),
                 }
             }
         }
@@ -1035,7 +1026,7 @@ impl World {
         }
 
         // Dispatch the most urgent requests.
-        self.wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
+        self.wanted.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then_with(|| (a.1.z, a.1.x, a.1.y).cmp(&(b.1.z, b.1.x, b.1.y))));
         if !departure_views.is_empty() {
             let mut seen = std::collections::HashSet::new();
             self.wanted.retain(|&(_, id)| seen.insert(id));
@@ -1091,6 +1082,39 @@ impl World {
             });
         }
         self.stats = (self.draw.len(), self.in_flight, self.draw_b.len());
+    }
+
+    fn select_scenery(
+        reach_factor: f64, eye: DVec3, (lat, lon, alt, ground): (f64, f64, f64, f64),
+        frustum: Option<&Frustum>, candidates: &mut HashMap<TileId, f32>,
+    ) {
+        let agl = (alt - ground).max(0.0);
+        if agl >= 7000.0 || lat.abs() >= 1.45 {
+            return;
+        }
+        let center = TileId::at(lat, lon, DATA_ZOOM);
+        let width = center.width_m();
+        let reach = (4500.0 + agl * 0.6).min(7500.0) * reach_factor;
+        let radius = (reach / width).ceil() as i64;
+        let size = 1_i64 << DATA_ZOOM;
+        for dy in -radius..=radius {
+            let y = i64::from(center.y) + dy;
+            if !(0..size).contains(&y) {
+                continue;
+            }
+            for dx in -radius..=radius {
+                let x = (i64::from(center.x) + dx).rem_euclid(size);
+                let id = TileId::new(DATA_ZOOM, x as u32, y as u32);
+                let (lat, lon) = id.lat_lon(0.5, 0.5);
+                let offset = geo::lla_to_pos(lat, lon, ground) - eye;
+                let distance = offset.length();
+                if distance > reach + width || frustum.is_some_and(|view| !view.sphere(offset, width + 600.0)) {
+                    continue;
+                }
+                let priority = 0.8 + (distance / width) as f32 * 0.6;
+                candidates.entry(id).and_modify(|p| *p = p.min(priority)).or_insert(priority);
+            }
+        }
     }
 
     fn request_airfield(&mut self, id: u32, priority: f32) {

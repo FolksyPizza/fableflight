@@ -1032,6 +1032,11 @@ fn cloud_at(pos: vec2f, d: f32) -> vec4f {
   }
   return (acc + best * 0.01) / (wsum + 0.01);
 }
+fn reveal_clouds(cloud: vec4f) -> vec4f {
+  let visible = clamp(1.0 + G.start.x, 0.0, 1.0);
+  return mix(vec4f(0.0, 0.0, 0.0, 1.0), cloud, visible);
+}
+
 @fragment fn fs_apply(in: FsIn) -> @location(0) vec4f {
   let px = vec2i(in.pos.xy);
   let z = textureLoad(t_depth, px, 0);
@@ -1039,15 +1044,15 @@ fn cloud_at(pos: vec2f, d: f32) -> vec4f {
   // cover (1 - alpha) with sky; that part needs the clouds in front of the sky,
   // the covered part those in front of the geometry.
   let cov = textureLoad(t_color, px, 0).a;
-  if (z == 0.0 || cov < 0.004) { return cloud_at(in.pos.xy, SKY_KM); }
+  if (z == 0.0 || cov < 0.004) { return reveal_clouds(cloud_at(in.pos.xy, SKY_KM)); }
   let ray = view_ray(in.uv);
   let cg = cloud_at(in.pos.xy, min(length(ray / z) * 0.001, SKY_KM));
-  if (cov > 0.996) { return cg; }
+  if (cov > 0.996) { return reveal_clouds(cg); }
   let cs = cloud_at(in.pos.xy, SKY_KM);
   // Same sky (and jitter) the composite blended in. With dst = cov*G + (1-cov)*S,
   // dst*cg.a + L = cov*(G*cg.a + cg.rgb) + (1-cov)*(S*cs.a + cs.rgb).
   let S = clamp(sky_color(normalize(ray), ign(in.pos.xy)), vec3f(0.0), vec3f(3000.0));
-  return vec4f(cov * cg.rgb + (1.0 - cov) * (cs.rgb + S * (cs.a - cg.a)), cg.a);
+  return reveal_clouds(vec4f(cov * cg.rgb + (1.0 - cov) * (cs.rgb + S * (cs.a - cg.a)), cg.a));
 }
 
 // Cloud shadow map (render.rs CloudShadow, read by cloud_sun): per texel, a ray along

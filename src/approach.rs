@@ -1,7 +1,7 @@
 //! Optional visual aid for the nearby airfield's active runway.
 use crate::{airports, geo, traffic};
-use egui::{Color32, Pos2, Stroke, Vec2};
-use glam::{DVec3, Mat4};
+use egui::{Color32, Stroke, Vec2};
+use glam::DVec3;
 
 pub struct Guide {
     pub name: String,
@@ -15,6 +15,20 @@ pub struct Guide {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guides_leave_space_around_the_plane_and_hide_when_pointed_away() {
+        let guide = Guide {
+            name: "TEST 09".into(), threshold: DVec3::X * (geo::R + 100.0),
+            direction: DVec3::Y, up: DVec3::X, aim: 300.0, width: 35.0,
+        };
+        let plane = guide.center(850.0);
+        let camera = plane - DVec3::Y * 20.0;
+        let lines = guide.world_lines(camera, plane, DVec3::Y);
+        assert_eq!(lines.len(), 16);
+        assert!(lines.iter().all(|p| p[1] > 95.0));
+        assert!(guide.world_lines(camera, plane, -DVec3::Y).is_empty());
+    }
 
     #[test]
     fn arrival_gates_extend_before_threshold_and_follow_three_degree_slope() {
@@ -50,34 +64,34 @@ impl Guide {
         ground + ground.normalize() * ((distance + self.aim) * 3.0_f64.to_radians().tan())
     }
 
-    pub fn draw_world(&self, ctx: &egui::Context, vp: Mat4, camera: DVec3, aircraft: DVec3) {
-        // Only the arrival side gets gates, never the departure/rollout side.
-        let along = (self.threshold - aircraft).dot(self.direction);
-        if !(0.0..=18_000.0).contains(&along) { return; }
-        let screen = ctx.content_rect();
-        let painter = ctx.layer_painter(egui::LayerId::background());
-        let project = |point: DVec3| -> Option<Pos2> {
-            let c = vp * (point - camera).as_vec3().extend(1.0);
-            if c.w < 1.0 || c.z < 0.0 { return None; }
-            Some(Pos2::new(screen.left() + (c.x / c.w * 0.5 + 0.5) * screen.width(), screen.top() + (0.5 - c.y / c.w * 0.5) * screen.height()))
-        };
+    pub const MAX_VERTICES: usize = 21 * 8;
+
+    pub fn world_lines(&self, camera: DVec3, aircraft: DVec3, forward: DVec3) -> Vec<[f32; 3]> {
+        let to_threshold = self.threshold - aircraft;
+        let along = to_threshold.dot(self.direction);
         let right = self.direction.cross(self.up).normalize();
-        for i in (0..=20).rev() {
+        if !(0.0..=18_000.0).contains(&along) || forward.dot(self.direction) < 0.65
+            || to_threshold.dot(right).abs() > along * 0.25 + 220.0
+        {
+            return Vec::new();
+        }
+        let mut lines = Vec::with_capacity(Self::MAX_VERTICES);
+        for i in 0..21 {
             let distance = 250.0 + i as f64 * 500.0;
+            // Leave room around the airplane, including in an external camera.
+            if distance + 95.0 > along {
+                break;
+            }
             let center = self.center(distance);
             let half_width = self.width + distance * 0.012;
             let half_height = 12.0 + distance * 0.004;
             let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
-                .map(|(x, y)| project(center + right * x * half_width + self.up * y * half_height));
-            let [Some(a), Some(b), Some(c), Some(d)] = corners else { continue; };
-            let color = Color32::from_rgba_unmultiplied(255, 145, 50, 190);
-            painter.add(egui::Shape::closed_line(vec![a, b, c, d], Stroke::new(1.5, color)));
+                .map(|(x, y)| (center - camera + right * x * half_width + self.up * y * half_height).as_vec3().to_array());
+            for edge in 0..4 {
+                lines.extend([corners[edge], corners[(edge + 1) % 4]]);
+            }
         }
-        if let Some(at) = project(self.center(250.0)) {
-            painter.text(at + Vec2::new(0.0, -24.0), egui::Align2::CENTER_BOTTOM,
-                crate::t!("Visual approach {} · 3°", "Approche visuelle {} · 3°", self.name),
-                egui::FontId::proportional(13.0), Color32::from_rgb(255, 145, 50));
-        }
+        lines
     }
 
     pub fn draw_map(&self, painter: &egui::Painter, rect: egui::Rect, cx: f64, cy: f64, n: f64, angle: f64) {

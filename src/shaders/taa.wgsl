@@ -71,6 +71,7 @@ fn history(uv: vec2f) -> vec3f {
   var mn = yc;
   var mx = yc;
   var zc = 0.0;
+  var z_far = 1.0;
   var off = vec2i(0);
   for (var y = -1; y <= 1; y++) {
     for (var x = -1; x <= 1; x++) {
@@ -81,6 +82,7 @@ fn history(uv: vec2f) -> vec3f {
       mn = min(mn, s);
       mx = max(mx, s);
       let z = textureLoad(t_depth, q, 0);
+      z_far = min(z_far, z);
       if (z > zc) { zc = z; off = q - px; }
     }
   }
@@ -112,7 +114,11 @@ fn history(uv: vec2f) -> vec3f {
   let h = clamp(to_ycc(squash(history(huv))), lo, hi);
   let speed = length((huv - in.uv) * G.screen.xy);
   let moving = smoothstep(0.02, 0.4, speed);
-  let a = max(mix(TAA_BLEND, TAA_BLEND_MOVING, moving), react * 0.9);
+  // Avoid dragging the old sky, ground or water color behind a moving
+  // silhouette. The depth samples are already read for reprojection.
+  let silhouette = smoothstep(0.08, 0.45, (zc - z_far) / max(zc, 1e-6));
+  let edge_blend = mix(TAA_BLEND_MOVING, 0.62, silhouette);
+  let a = max(mix(TAA_BLEND, edge_blend, moving), react * 0.9);
   let o = unsquash(max(from_ycc(mix(h, yc, a)), vec3f(0.0)));
   // Alpha: how much the pixel is moving, for the sharpening that follows (post.wgsl).
   return vec4f(clamp(o, vec3f(0.0), vec3f(3000.0)), moving);

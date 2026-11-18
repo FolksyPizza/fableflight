@@ -152,7 +152,7 @@ pub struct Globals {
     /// churned white water where a crash went into it, two each: centre
     /// (camera-relative) + radius (m, 0 = none); strength 0..1, age (s), seed
     pub foam: [[f32; 4]; 16],
-    /// the start screen: x = 1 while it shows (deep-space sky, no clouds)
+    /// x = 1 on the globe, -1..0 while weather fades in during departure
     pub start: [f32; 4],
     /// storms close up (storm.rs): bit mask of the cells near enough to darken
     /// the ground, rain at the camera 0..1, lightning flashes lit, how deep the
@@ -757,6 +757,7 @@ pub struct Frame<'a> {
     pub fields: Vec<(&'a FieldGpu, [f32; 3])>,
     /// lights on moving things, camera-relative
     pub lights: Vec<crate::airfield::Light>,
+    pub approach_lines: Vec<[f32; 3]>,
     pub objs: Vec<DrawObj>,
     /// (mesh, instance) for cars, rubble, rocks
     pub insts: Vec<(u32, Inst)>,
@@ -883,6 +884,8 @@ pub struct Renderer {
     p_field: wgpu::RenderPipeline,
     p_lights: wgpu::RenderPipeline,
     dyn_lights: wgpu::Buffer,
+    p_approach: wgpu::RenderPipeline,
+    approach_buf: wgpu::Buffer,
     /// falling rain and lightning channels (precip.wgsl), over the clouds
     p_rain: wgpu::RenderPipeline,
     p_veil: wgpu::RenderPipeline,
@@ -1536,6 +1539,7 @@ impl Renderer {
         let m_road = module("roads", include_str!("shaders/roads.wgsl"));
         let m_field = module("airfield", include_str!("shaders/airfield.wgsl"));
         let m_lights = module("lights", include_str!("shaders/lights.wgsl"));
+        let m_approach = module("approach", include_str!("shaders/approach.wgsl"));
         let m_tree = module("trees", include_str!("shaders/trees.wgsl"));
         let m_inst = module("inst", &format!("{facade}\n{}", include_str!("shaders/inst.wgsl")));
         let m_vol = module("vol", include_str!("shaders/vol.wgsl"));
@@ -2064,6 +2068,20 @@ impl Renderer {
         let pl_obj = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_obj)], immediate_size: 0 });
         // Glass and the propeller blur: blended over the finished, lit scene,
         // tested against the resolved depth.
+        const A_APPROACH: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
+        let p_approach = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("approach gates"),
+            layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None, bind_group_layouts: &[Some(&l0)], immediate_size: 0,
+            })),
+            vertex: wgpu::VertexState { module: &m_approach, entry_point: Some("vs_approach"), compilation_options: Default::default(), buffers: &[vb(12, false, &A_APPROACH)] },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::LineList, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Greater), stencil: Default::default(), bias: Default::default() }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState { module: &m_approach, entry_point: Some("fs_approach"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: HDR, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::COLOR })] }),
+            multiview_mask: None,
+            cache: None,
+        });
         let p_glass = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("glass"),
             layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_obj), Some(&l_glass)], immediate_size: 0 })),
@@ -2178,6 +2196,7 @@ impl Renderer {
         let (inst_buf, fall_buf) = (dynbuf("instances", MAX_INST as u64 * 80), dynbuf("loose trees", MAX_FALL as u64 * 36));
         let near_buf = dynbuf("near trees", MAX_NEAR as u64 * 36);
         let dyn_lights = dynbuf("aircraft lights", MAX_DYN_LIGHTS as u64 * 40);
+        let approach_buf = dynbuf("approach gates", crate::approach::Guide::MAX_VERTICES as u64 * 12);
         let bolt_buf = dynbuf("lightning", crate::storm::MAX_SEGS as u64 * 32);
         // (No paint until the aircraft is known: `set_paint`.)
         let paint = paint_texture(d, &queue, None);
@@ -2241,7 +2260,7 @@ impl Renderer {
         Ok(Self {
             ao_clear: false,
             ground_mats,
-            casc_ub, bg_casc, bg_tileu, l_dres, l_ao, p_gtao, p_ao_blur, p_dres, p_road, p_field, p_lights, dyn_lights, p_rain, p_veil, p_bolt, bolt_buf, p_tree, p_tree_near, imp, p_tree_shadow, p_tree_shadow_fixed, p_card, near_buf, p_inst, p_inst_shadow, inst_buf, fall_buf, tree_lib: None, inst_lib: None,
+            casc_ub, bg_casc, bg_tileu, l_dres, l_ao, p_gtao, p_ao_blur, p_dres, p_road, p_field, p_lights, dyn_lights, p_approach, approach_buf, p_rain, p_veil, p_bolt, bolt_buf, p_tree, p_tree_near, imp, p_tree_shadow, p_tree_shadow_fixed, p_card, near_buf, p_inst, p_inst_shadow, inst_buf, fall_buf, tree_lib: None, inst_lib: None,
             gpu_timer: crate::gputime::GpuTimer::new(&device, &queue),
             globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res, bg0_src, scale: gfx.scale, ao: gfx.ao, cloud_step: gfx.cloud_step(), l_tile, l_build, l_composite, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
             tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, light_cover, light_cover_view, glow_tex, gclouds_tex, build_ub, obj_ub, bg_obj, l_obj, paint_ub, tile_ibuf, tile_nidx: ix.len() as u32,
@@ -2653,7 +2672,7 @@ impl Renderer {
         }
         let sview = frame.as_ref().map(|f| f.texture.create_view(&Default::default()));
         let q = &self.queue;
-        let render_clouds = f.g.start[0] <= 0.0;
+        let render_clouds = f.g.start[0] > -1.0 && f.g.start[0] <= 0.0;
         if render_clouds {
             self.cloud_flip ^= 1;
             if !self.cloud_hist_ok {
@@ -3403,10 +3422,16 @@ impl Renderer {
         full(&mut enc, &t.hdr, false, &self.p_composite_edge, &t.bg_composite);
         mark(&mut enc, "composite");
         // Lights over the lit scene, under the clouds.
-        if n_fields > 0 || n_dyn > 0 {
+        if n_fields > 0 || n_dyn > 0 || !f.approach_lines.is_empty() {
             let ds = wgpu::RenderPassDepthStencilAttachment { view: &t.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }), stencil_ops: None };
             let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&t.hdr, false))], Some(ds)));
             rp.set_bind_group(0, &self.bg0, &[]);
+            if !f.approach_lines.is_empty() {
+                q.write_buffer(&self.approach_buf, 0, bytemuck::cast_slice(&f.approach_lines));
+                rp.set_pipeline(&self.p_approach);
+                rp.set_vertex_buffer(0, self.approach_buf.slice(..));
+                rp.draw(0..f.approach_lines.len() as u32, 0..1);
+            }
             rp.set_pipeline(&self.p_lights);
             for (i, (fg, _)) in f.fields.iter().take(n_fields).enumerate() {
                 if let Some((buf, n)) = &fg.lights {

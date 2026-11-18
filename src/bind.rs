@@ -184,6 +184,8 @@ pub struct AxisBind {
     /// dead zone: round the centre of a stick or pedals, at the idle end
     /// of a throttle or brake (fraction of the travel)
     pub dead: f32,
+    /// Blend from a linear response to cubic around the neutral point.
+    pub curve: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -284,7 +286,7 @@ impl Bindings {
             let d = v - base;
             if d.abs() > 0.6 {
                 self.axes.retain(|_, b| !(b.dev == dev && b.code == code));
-                self.axes.insert(a, AxisBind { dev, name: name.to_string(), code, sign: d.signum(), dead: a.default_dead() });
+                self.axes.insert(a, AxisBind { dev, name: name.to_string(), code, sign: d.signum(), dead: a.default_dead(), curve: 0.0 });
                 self.capture = None;
             }
         }
@@ -325,7 +327,8 @@ impl Bindings {
         // The dead zone, the rest of the travel stretched so there is no step out of it.
         let d = (b.dead as f64).clamp(0.0, 0.5);
         Some(if a.centred() {
-            if v.abs() < d { 0.0 } else { v.signum() * (v.abs() - d) / (1.0 - d) }
+            let travel = v.signum() * ((v.abs() - d) / (1.0 - d)).clamp(0.0, 1.0);
+            travel + f64::from(b.curve) * (travel * travel * travel - travel)
         } else {
             let f = ((v + 1.0) * 0.5).clamp(0.0, 1.0);
             if f < d { 0.0 } else { (f - d) / (1.0 - d) }
@@ -370,7 +373,8 @@ impl Bindings {
             if let (Some(a), Some((dev, name, code))) = (v["action"].as_str().and_then(AxisAct::parse), dev(v)) {
                 let sign = if v["sign"].as_f64().unwrap_or(1.0) < 0.0 { -1.0 } else { 1.0 };
                 let dead = v["dead"].as_f64().map(|d| d.clamp(0.0, 0.5) as f32).unwrap_or(a.default_dead());
-                self.axes.insert(a, AxisBind { dev, name, code, sign, dead });
+                let curve = v["curve"].as_f64().unwrap_or(0.0).clamp(0.0, 0.85) as f32;
+                self.axes.insert(a, AxisBind { dev, name, code, sign, dead, curve });
             }
         }
         for v in j["buttons"].as_array().into_iter().flatten() {
@@ -392,7 +396,7 @@ impl Bindings {
         for (id, k) in &self.keys {
             keys.insert(id.to_string(), k.map(|k| serde_json::Value::String(format!("{k:?}"))).unwrap_or(serde_json::Value::Null));
         }
-        let mut axes: Vec<_> = self.axes.iter().map(|(a, b)| serde_json::json!({ "action": a.id(), "device": hex(&b.dev), "name": b.name, "code": b.code, "sign": b.sign, "dead": b.dead })).collect();
+        let mut axes: Vec<_> = self.axes.iter().map(|(a, b)| serde_json::json!({ "action": a.id(), "device": hex(&b.dev), "name": b.name, "code": b.code, "sign": b.sign, "dead": b.dead, "curve": b.curve })).collect();
         let mut buttons: Vec<_> = self.buttons.iter().map(|(id, b)| serde_json::json!({ "action": id, "device": hex(&b.dev), "name": b.name, "code": b.code })).collect();
         axes.sort_by_key(|v| v["action"].to_string());
         buttons.sort_by_key(|v| v["action"].to_string());
@@ -497,7 +501,7 @@ impl Bindings {
     pub fn apply_preset(&mut self, p: &Preset, dev: Uuid, name: &str, over: bool) {
         for &(a, code, sign, dead) in p.axes {
             if over || !self.axes.contains_key(&a) {
-                self.axes.insert(a, AxisBind { dev, name: name.to_string(), code, sign, dead });
+                self.axes.insert(a, AxisBind { dev, name: name.to_string(), code, sign, dead, curve: 0.0 });
             }
         }
         for &(id, code) in p.buttons {
@@ -697,7 +701,7 @@ mod tests {
         b.button_event(dev, "Throttle quadrant", 290, true);
         assert_eq!(b.take_edges(), vec![("gear", false), ("gear", true)]);
         b.set_key("gear", KeyCode::KeyJ);
-        b.axes.insert(AxisAct::Yaw, AxisBind { dev, name: "Pedals".into(), code: 5, sign: -1.0, dead: 0.1 });
+        b.axes.insert(AxisAct::Yaw, AxisBind { dev, name: "Pedals".into(), code: 5, sign: -1.0, dead: 0.1, curve: 0.65 });
         let mut c = Bindings::default();
         c.read(&b.json());
         assert_eq!(c.buttons, b.buttons);
@@ -711,8 +715,8 @@ mod tests {
     fn dead_zones() {
         let mut b = Bindings::default();
         let dev = [1u8; 16];
-        b.axes.insert(AxisAct::Roll, AxisBind { dev, name: "S".into(), code: 0, sign: 1.0, dead: 0.2 });
-        b.axes.insert(AxisAct::Throttle, AxisBind { dev, name: "S".into(), code: 6, sign: 1.0, dead: 0.1 });
+        b.axes.insert(AxisAct::Roll, AxisBind { dev, name: "S".into(), code: 0, sign: 1.0, dead: 0.2, curve: 0.0 });
+        b.axes.insert(AxisAct::Throttle, AxisBind { dev, name: "S".into(), code: 6, sign: 1.0, dead: 0.1, curve: 0.0 });
         b.axis_event(dev, "S", 0, 0.15);
         b.axis_event(dev, "S", 6, -0.85);
         assert_eq!((b.axis(AxisAct::Roll), b.axis(AxisAct::Throttle)), (Some(0.0), Some(0.0)));
@@ -720,6 +724,10 @@ mod tests {
         b.axis_event(dev, "S", 6, 1.0);
         assert!((b.axis(AxisAct::Roll).unwrap() - 0.5).abs() < 1e-6);
         assert_eq!(b.axis(AxisAct::Throttle), Some(1.0));
+        b.axes.get_mut(&AxisAct::Roll).unwrap().curve = 0.8;
+        assert!((b.axis(AxisAct::Roll).unwrap() - 0.2).abs() < 1e-6);
+        b.axis_event(dev, "S", 0, -1.0);
+        assert_eq!(b.axis(AxisAct::Roll), Some(-1.0));
     }
 
     #[test]

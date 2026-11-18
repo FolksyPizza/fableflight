@@ -68,7 +68,7 @@ pub(crate) fn readable_status(message: &str) -> String {
 
 pub(crate) fn tools_frame() -> egui::Frame {
     egui::Frame::new()
-        .fill(Color32::from_rgba_unmultiplied(13, 19, 27, 247))
+        .fill(menu::PANEL)
         .stroke(Stroke::new(1.0, Color32::from_rgb(58, 69, 82)))
         .corner_radius(4)
 }

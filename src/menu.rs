@@ -1,7 +1,7 @@
 //! Main menu: the planet itself is the map. Spin it, zoom in, click where
 //! you want to start.
 use crate::{geo, t};
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 
 /// (name, latitude, longitude, tier). Tier 1 is always labelled, tier 2 once zoomed in a little.
 pub const CITIES: &[(&str, f64, f64, u8)] = &[
@@ -98,12 +98,33 @@ pub const AIRPORTS: &[(&str, &str)] = &[
     ("KOSH", "Oshkosh"),
 ];
 
+struct GlobeFocus {
+    from: DVec3,
+    turn: DQuat,
+    lift: f64,
+    elapsed: f64,
+    duration: f64,
+}
+
+impl GlobeFocus {
+    fn progress(&self) -> f64 {
+        (self.elapsed / self.duration).clamp(0.0, 1.0)
+    }
+
+    fn direction(&self) -> DVec3 {
+        let t = self.progress();
+        let mix = t * t * t * (t * (6.0 * t - 15.0) + 10.0);
+        DQuat::IDENTITY.slerp(self.turn, mix) * self.from
+    }
+}
+
 pub struct Menu {
     /// what the camera is looking straight down at, degrees
     pub lat: f64,
     pub lon: f64,
     pub alt: f64,
     target_alt: f64,
+    focus: Option<GlobeFocus>,
     pub pick: Option<(f64, f64)>,
     pub pick_name: String,
     pub search: String,
@@ -192,25 +213,70 @@ pub enum Start {
 }
 
 impl Menu {
+    const ORBIT_ALT: f64 = 11_000_000.0;
+
     pub fn new(lat: f64, lon: f64, hour: f64) -> Self {
-        Self { lat, lon, alt: 1.5e7, target_alt: 1.1e7, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, screen: Screen::Main, air_back: Screen::Main, air_view: 0, spin: 1.0, airport: None, start: Start::Runway, runway: None, start_agl: 450.0, markers: Vec::new(), aircraft: 0, air_tab: crate::hangar_ui::Tab::Mine, hangar_sel: None, hangar_find: String::new(), hangar_all: false, fuel: 0.5, cold: false, payload: None }
+        Self { lat, lon, alt: 15_000_000.0, target_alt: Self::ORBIT_ALT, focus: None, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, screen: Screen::Main, air_back: Screen::Main, air_view: 0, spin: 1.0, airport: None, start: Start::Runway, runway: None, start_agl: 450.0, markers: Vec::new(), aircraft: 0, air_tab: crate::hangar_ui::Tab::Mine, hangar_sel: None, hangar_find: String::new(), hangar_all: false, fuel: 0.5, cold: false, payload: None }
     }
 
     pub fn look_at(&mut self, lat: f64, lon: f64, alt: f64) {
-        (self.lat, self.lon, self.target_alt) = (lat, lon, alt);
-        self.alt = self.alt.max(alt);
+        let from = self.footprint();
+        let to = geo::lla_to_pos(lat.to_radians(), lon.to_radians(), 0.0).normalize();
+        let angle = from.angle_between(to);
+        self.focus = (angle > 0.002).then(|| GlobeFocus {
+            from, turn: DQuat::from_rotation_arc(from, to), elapsed: 0.0,
+            duration: 0.55 + angle.min(1.45) * 0.52,
+            lift: (angle * geo::R * 0.36 - self.alt).clamp(0.0, 4_000_000.0),
+        });
+        (self.lat, self.lon, self.target_alt) = (lat, lon, alt.max(1.0));
+        self.alt = self.alt.max(self.target_alt);
         self.spin = 0.0;
+    }
+
+    pub fn reset_globe(&mut self, utc: f64) {
+        self.lat = 25.0;
+        self.lon = day_side_lon(utc);
+        self.alt = Self::ORBIT_ALT;
+        self.target_alt = Self::ORBIT_ALT;
+        self.focus = None;
+        self.markers.clear();
+        self.press = None;
+        self.dragged = 0.0;
+        self.spin = 1.0;
+    }
+
+    fn footprint(&self) -> DVec3 {
+        self.focus.as_ref().map_or_else(
+            || geo::lla_to_pos(self.lat.to_radians(), self.lon.to_radians(), 0.0).normalize(),
+            GlobeFocus::direction,
+        )
     }
 
     /// Eye position and the view basis (direction, up).
     pub fn camera(&self) -> (DVec3, DVec3, DVec3) {
-        let cam = geo::lla_to_pos(self.lat.to_radians(), self.lon.to_radians(), self.alt);
+        let lift = self.focus.as_ref().map_or(0.0, |focus| {
+            focus.lift * (focus.progress() * std::f64::consts::PI).sin().powi(2)
+        });
+        let cam = self.footprint() * (geo::R + self.alt + lift);
         let (_, n, u) = geo::enu(cam);
         (cam, -u, n)
     }
 
     pub fn update(&mut self, dt: f64) {
-        self.alt += (self.target_alt - self.alt) * (dt * 6.0).min(1.0);
+        // Zoom at a constant rate in log-height so near and orbital moves have
+        // the same response and never rush through the last few kilometres.
+        let blend = -(-dt * 5.5).exp_m1();
+        self.alt = self.alt.max(1.0);
+        self.alt *= ((self.target_alt / self.alt).ln() * blend).exp();
+        if let Some(focus) = &mut self.focus {
+            focus.elapsed += dt;
+            if focus.elapsed >= focus.duration {
+                self.focus = None;
+            }
+        }
+        if (self.target_alt - self.alt).abs() < 0.5 {
+            self.alt = self.target_alt;
+        }
         // The globe drifts slowly (0.3°/s, so the opening view stays on the
         // day side for minutes) until you drag, zoom or pick on it.
         if self.spin > 0.0 && self.press.is_none() {
@@ -229,6 +295,10 @@ impl Menu {
     }
 
     pub fn drag(&mut self, dx: f64, dy: f64, h: f64, fov: f64) {
+        if let Some(focus) = self.focus.take() {
+            let (lat, lon, _) = geo::pos_to_lla(focus.direction() * geo::R);
+            (self.lat, self.lon) = (lat.to_degrees(), lon.to_degrees());
+        }
         let mpp = self.metres_per_pixel(h, fov);
         self.lat = (self.lat + (dy * mpp / geo::R).to_degrees()).clamp(-84.0, 84.0);
         self.lon -= (dx * mpp / (geo::R * self.lat.to_radians().cos().max(0.15))).to_degrees();
@@ -393,9 +463,9 @@ pub const DIM: Color32 = Color32::from_rgb(146, 156, 171);
 /// quieter than DIM: credits, unchosen captions (still 4.5:1 on BG)
 pub const FAINT: Color32 = Color32::from_rgb(118, 128, 143);
 /// the full-screen backdrop
-pub const BG: Color32 = Color32::from_rgb(8, 11, 16);
+pub const BG: Color32 = Color32::from_rgb(9, 14, 20);
 /// a card or group on the backdrop
-pub const SURFACE: Color32 = Color32::from_rgb(15, 19, 26);
+pub const SURFACE: Color32 = Color32::from_rgb(16, 24, 33);
 /// a control's resting fill (buttons, tracks)
 pub const RAISED: Color32 = Color32::from_rgb(28, 34, 44);
 /// a control under the pointer
@@ -410,9 +480,12 @@ pub const LINE_HI: Color32 = Color32::from_rgba_premultiplied(44, 44, 44, 44);
 pub const LINK: Color32 = Color32::from_rgb(132, 184, 255);
 pub const OK: Color32 = Color32::from_rgb(112, 214, 138);
 pub const BAD: Color32 = Color32::from_rgb(255, 122, 92);
-pub const PANEL: Color32 = Color32::from_rgba_premultiplied(9, 12, 17, 232);
+pub const PANEL: Color32 = Color32::from_rgba_premultiplied(12, 19, 27, 244);
 /// the see-through glass of the flight panel, over the running game
-pub const GLASS: Color32 = Color32::from_rgba_premultiplied(5, 8, 12, 150);
+pub const GLASS: Color32 = Color32::from_rgba_premultiplied(10, 17, 25, 200);
+const ACTION: Color32 = Color32::from_rgb(174, 213, 235);
+const ACTION_HOVER: Color32 = Color32::from_rgb(211, 235, 248);
+const ON_ACTION: Color32 = Color32::from_rgb(11, 31, 48);
 
 /// Eases a hover (or any on/off state) in and out instead of snapping: 0..1.
 pub fn ease(ctx: &egui::Context, id: egui::Id, on: bool) -> f32 {
@@ -777,8 +850,8 @@ pub fn wide_button(ui: &mut egui::Ui, text: &str, hint: Hint, primary: bool, ena
     let p = ui.painter();
     let (font, col, hc) = if primary {
         if enabled {
-            p.rect_filled(rect, R_WIDGET, mix(Color32::from_rgb(32, 83, 133), Color32::from_rgb(44, 105, 165), lit));
-            (medium(18.0), Color32::WHITE, Color32::from_rgb(196, 219, 244))
+            p.rect_filled(rect, R_WIDGET, mix(ACTION, ACTION_HOVER, lit));
+            (medium(18.0), ON_ACTION, ON_ACTION)
         } else {
             p.rect_filled(rect, R_WIDGET, RAISED);
             (medium(18.0), FAINT, FAINT)
@@ -1121,7 +1194,7 @@ pub fn big_button(ui: &mut egui::Ui, text: &str, hint: Hint, primary: bool, chos
     let pick = ui.ctx().animate_bool_with_time_and_easing(resp.id.with("chosen"), chosen, 0.18, egui::emath::easing::cubic_out);
     let p = ui.painter();
     let (fill, col) = if primary {
-        (mix(ACCENT, ACCENT_HI, lit), ON_ACCENT)
+        (mix(ACTION, ACTION_HOVER, lit), ON_ACTION)
     } else {
         let rest = Color32::from_rgba_premultiplied(14, 18, 24, 214);
         (mix(mix(rest, Color32::from_rgba_premultiplied(36, 43, 54, 232), lit), Color32::from_rgba_premultiplied(44, 52, 66, 240), pick), mix(TEXT, Color32::WHITE, lit.max(pick)))
@@ -1145,7 +1218,7 @@ pub fn big_button(ui: &mut egui::Ui, text: &str, hint: Hint, primary: bool, chos
     } else {
         p.text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, text, font, col);
     }
-    let hc = if primary { ON_ACCENT.gamma_multiply(0.65) } else { DIM };
+    let hc = if primary { ON_ACTION } else { DIM };
     paint_hint(p, hint, rect.right() - 16.0, rect.center().y, 20.0, hc);
     resp
 }
@@ -1153,6 +1226,22 @@ pub fn big_button(ui: &mut egui::Ui, text: &str, hint: Hint, primary: bool, chos
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn globe_eases_through_the_dateline_and_can_reset_to_orbit() {
+        let mut globe = Menu::new(12.0, 179.0, 12.0);
+        let original = globe.camera().0.normalize();
+        globe.look_at(12.0, -179.0, 25_000.0);
+        assert!(globe.camera().0.normalize().distance(original) < 1e-9);
+        globe.update(0.28);
+        assert!(geo::pos_to_lla(globe.camera().0).1.to_degrees().abs() > 179.3);
+        globe.update(2.0);
+        assert!((geo::pos_to_lla(globe.camera().0).1.to_degrees() + 179.0).abs() < 1e-7);
+        globe.reset_globe(12.0);
+        assert_eq!(globe.alt, Menu::ORBIT_ALT);
+        assert_eq!(globe.lon, day_side_lon(12.0));
+        assert!(globe.focus.is_none());
+    }
 
     #[test]
     fn screens_parse() {

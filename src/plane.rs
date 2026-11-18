@@ -246,6 +246,15 @@ fn part_group(p: Part) -> usize {
     }
 }
 
+/// A tire's braking and cornering forces share a finite patch of grip.
+fn tire_forces(side: f64, long: f64, side_limit: f64, long_limit: f64) -> (f64, f64) {
+    let side = side.clamp(-side_limit, side_limit);
+    let long = long.clamp(-long_limit, long_limit);
+    let demand = (side / side_limit.max(f64::EPSILON)).hypot(long / long_limit.max(f64::EPSILON));
+    let grip = demand.max(1.0).recip();
+    (side * grip, long * grip)
+}
+
 /// Sea-level air density (kg/m³).
 pub const RHO0: f64 = 1.225;
 
@@ -1931,11 +1940,10 @@ impl Plane {
                     }
                     let side = fwd.cross(upw);
                     let (vl, vs) = (pv.dot(fwd), pv.dot(side));
-                    let f_side = (-vs * leg.side_k).clamp(-leg.side_mu * nf, leg.side_mu * nf);
                     let brake = if leg.brakes { self.brake_pressure(c, leg.at.x) } else { 0.0 };
                     let mu = leg.roll_mu + (leg.brake_mu - leg.roll_mu) * brake;
                     let drag = leg.roll_k + (leg.brake_k - leg.roll_k) * brake;
-                    let f_long = (-vl * drag).clamp(-mu * nf, mu * nf);
+                    let (f_side, f_long) = tire_forces(-vs * leg.side_k, -vl * drag, leg.side_mu * nf, mu * nf);
                     let f = upw * nf + side * f_side + fwd * f_long;
                     force_w += f;
                     torque_b += r.cross(self.rot.inverse() * f);
@@ -2329,6 +2337,16 @@ mod tests {
     const C172: &Spec = &c172::SPEC;
     const B747: &Spec = &b747::SPEC;
     const DR400: &Spec = &crate::aircraft::dr400::SPEC;
+
+    #[test]
+    fn tires_share_grip_between_braking_and_cornering() {
+        assert_eq!(tire_forces(-100.0, 0.0, 50.0, 80.0), (-50.0, 0.0));
+        assert_eq!(tire_forces(0.0, -100.0, 50.0, 80.0), (0.0, -80.0));
+        assert_eq!(tire_forces(40.0, -100.0, 0.0, 0.0), (0.0, 0.0));
+        let (side, brake) = tire_forces(50.0, -80.0, 50.0, 80.0);
+        assert!((side / 50.0).hypot(brake / 80.0) <= 1.0 + 1e-12);
+        assert!(side > 0.0 && side < 50.0 && brake < 0.0 && brake > -80.0);
+    }
 
     fn empty_world() -> World {
         let dir = std::env::temp_dir().join("fablegame-test-cache");
