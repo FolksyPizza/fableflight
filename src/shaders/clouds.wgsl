@@ -1096,16 +1096,28 @@ fn cshadow_ray(px: vec2f, ext: f32) -> vec4f {
   // fine noise, which the lookup's smooth filter averages away; it is tied to the
   // texel, which stays put on the ground from map to map, so it does not shimmer.
   let n = i32(clamp(tl / 300.0, 32.0, 56.0));
-  let dt = tl / f32(n);
+  let nf = f32(n);
   let jit = ign(px);
+  // Steps packed towards the base, t = tl u (u + K) / (1 + K): fair-weather puffs
+  // are only 60-150 m thick there, and evenly spaced steps (60-90 m apart in
+  // height) hit or missed them by the jitter alone, so neighbouring texels
+  // alternated dark and light and the shadows showed as a grid of dots. Now ~6x
+  // finer at the base, under 2x coarser at the top (towers, km across), the
+  // same step count; it follows the bands' squeeze towards the base too.
+  const K = 0.2;
+  let ts = tl / (1.0 + K);
   // The column weather changes slowly along the ray: look it up every other step.
   var wx = no_weather();
   for (var i = 0; i < n; i++) {
-    let p = q + sun * (dt * (f32(i) + jit));
+    let u = (f32(i) + jit) / nf;
+    let p = q + sun * (ts * u * (u + K));
     let h = length(p) - rg;
-    if ((i & 1) == 0) { wx = cloud_weather_m(q + sun * (dt * (f32(i) + 1.0)), smask); }
+    if ((i & 1) == 0) {
+      let uw = (f32(i) + 1.0) / nf;
+      wx = cloud_weather_m(q + sun * (ts * uw * (uw + K)), smask);
+    }
     let d = cloud_shape(p, h, wx, false);
-    if (d > 0.0) { b += cs_band(h) * (d * dt); }
+    if (d > 0.0) { b += cs_band(h) * (d * ts * (2.0 * u + K) / nf); }
   }
   // The mid-level layer (which drifts half as fast again): one crossing of its lens.
   if (G.alto.x > 0.0) {
