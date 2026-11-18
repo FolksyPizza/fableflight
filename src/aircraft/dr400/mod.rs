@@ -709,8 +709,10 @@ fn wings(b: &mut Builder) {
     w.lathe(&mt(mat::LAMP, 0.1, 0.9, 0.2).x(lamp::NAV_GREEN), p + Vec3::new(0.0, 0.0, -0.01), Vec3::new(0.6, 0.0, -0.8), &[[0.019, 0.0], [0.019, 0.011], [0.012, 0.026], [0.0, 0.03]], 16, true);
     // The landing light and the pitot, under the left wing (built on the right, moved).
     let mut left_extra = Mesh::default();
-    let (p, n) = foil_frame(&f, 1.5, 0.004, 0.0);
-    left_extra.disc(&mt(mat::LAMP, 0.95, 0.92, 0.85).x(lamp::LANDING), p + n * 0.002 - Vec3::Z * 0.004, Vec3::NEG_Z, Vec3::Y, 0.05, 20);
+    // (on the camber line at the nose, facing ahead: side 0 has no surface
+    // normal - foil_frame's would be NaN, which hid the lens and its light)
+    let p = f.pt(1.5, 0.004, 0.0, -1.0);
+    left_extra.disc(&mt(mat::LAMP, 0.95, 0.92, 0.85).x(lamp::LANDING), p - Vec3::Z * 0.006, Vec3::NEG_Z, Vec3::Y, 0.05, 20);
     // The stall warning vane in the leading edge.
     let (p, n) = foil_frame(&f, 0.95, 0.012, -1.0);
     let fwd = (Vec3::NEG_Z - n * Vec3::NEG_Z.dot(n)).normalize();

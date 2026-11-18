@@ -867,8 +867,11 @@ impl Model {
         Model { pieces, groups, tex: None }
     }
     /// Centre and half size of everything solid in it (body frame, at rest).
+    /// (Temporal anti-aliasing tells the aircraft's pixels by this box. A NaN
+    /// vertex is skipped: glam's min/max would take it and drop everything
+    /// before it, and a box that misses the wings smears them in flight.)
     pub fn bounds(&self) -> (Vec3, Vec3) {
-        let (lo, hi) = self.pieces.iter().filter(|p| !p.glass && p.vis != Vis::Chute).flat_map(|p| p.mesh.v.iter()).fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| (lo.min(v.pos.into()), hi.max(v.pos.into())));
+        let (lo, hi) = self.pieces.iter().filter(|p| !p.glass && p.vis != Vis::Chute).flat_map(|p| p.mesh.v.iter()).map(|v| Vec3::from(v.pos)).filter(|p| p.is_finite()).fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), p| (lo.min(p), hi.max(p)));
         ((lo + hi) * 0.5, (hi - lo) * 0.5)
     }
 }

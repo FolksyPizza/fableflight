@@ -742,6 +742,37 @@ mod hotspot_tests {
 }
 
 #[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    /// No vertex of any aircraft may be NaN or infinite, and the bounds (the
+    /// box temporal anti-aliasing tells the aircraft's pixels by) hold every
+    /// solid vertex. A NaN in the C172's door pocket once shrank that box to
+    /// the fuselage, and the wings smeared and stair-stepped in flight.
+    #[test]
+    fn every_vertex_is_finite_and_inside_the_bounds() {
+        let mut bad = Vec::new();
+        for spec in BUILTIN {
+            let model = (spec.build)();
+            let (c, h) = model.bounds();
+            for (i, p) in model.pieces.iter().enumerate() {
+                let nan: Vec<usize> = (0..p.mesh.v.len()).filter(|&k| !Vec3::from(p.mesh.v[k].pos).is_finite()).collect();
+                if let Some(&k) = nan.first() {
+                    let v = &p.mesh.v[k];
+                    bad.push(format!("{}: piece {i} ({}) has {} non-finite vertices (first #{k} of {}, pos {:?}, mat {:?})", spec.name, p.name, nan.len(), p.mesh.v.len(), v.pos, v.mat));
+                }
+                if !p.glass && p.vis != crate::airframe::Vis::Chute {
+                    if let Some(pos) = p.mesh.v.iter().map(|v| Vec3::from(v.pos)).find(|&q| q.is_finite() && ((q - c).abs() - h).max_element() > 1e-3) {
+                        bad.push(format!("{}: piece {i} vertex {pos:?} outside bounds {c:?} ± {h:?}", spec.name));
+                    }
+                }
+            }
+        }
+        assert!(bad.is_empty(), "\n{}", bad.join("\n"));
+    }
+}
+
+#[cfg(test)]
 mod boost_tests {
     use super::*;
 

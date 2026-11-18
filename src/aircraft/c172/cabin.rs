@@ -496,7 +496,8 @@ fn door_trim(m: &mut Mesh) {
     let rows: Vec<Vec<SP>> = (0..=16)
         .map(|i| {
             let z = zp0 + (zp1 - zp0) * i as f32 / 16.0;
-            let ends = (((z - zp0) / (zp1 - zp0) * PI).sin()).powf(0.3);
+            // (sin(PI) is a hair below zero in f32, and a negative to the 0.3 is NaN)
+            let ends = (((z - zp0) / (zp1 - zp0) * PI).sin()).max(0.0).powf(0.3);
             let bulge = 0.032 * ends;
             let x = |y: f32| inner_x(z, y);
             let prof = [(-0.40, 0.0015), (-0.385, bulge * 0.6), (-0.36, bulge), (-0.30, bulge), (-0.255, bulge * 0.95), (-0.25, bulge * 0.9), (-0.252, 0.004)];
