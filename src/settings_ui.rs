@@ -509,6 +509,13 @@ impl Game {
 
     fn set_controls(&mut self, ui: &mut Ui) {
         self.binds_capture_banner(ui);
+        card(ui, t!("Ground handling", "Conduite au sol"), |ui| {
+            row(ui, t!("Runway steering assist", "Assistance au guidage sur piste"),
+                t!("Helps hold the centreline during the takeoff roll. Pedal input takes over.",
+                   "Aide à tenir l’axe au décollage. Le palonnier reprend la main."), |ui| {
+                menu::switch(ui, &mut self.runway_assist);
+            });
+        });
         card(ui, t!("Mouse", "Souris"), |ui| {
             row(ui, t!("Mouse look speed", "Vitesse du regard (souris)"), t!("dragging to look around", "glisser pour regarder autour"), |ui| {
                 ui.add(egui::Slider::new(&mut self.look_sens, 0.25..=3.0).logarithmic(true).custom_formatter(|v, _| format!("{v:.2}×")));

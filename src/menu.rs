@@ -777,23 +777,19 @@ pub fn wide_button(ui: &mut egui::Ui, text: &str, hint: Hint, primary: bool, ena
     let p = ui.painter();
     let (font, col, hc) = if primary {
         if enabled {
-            p.rect_filled(rect, R_WIDGET, mix(ACCENT, ACCENT_HI, lit));
-            (bold(21.0), ON_ACCENT, ON_ACCENT.gamma_multiply(0.65))
+            p.rect_filled(rect, R_WIDGET, mix(Color32::from_rgb(32, 83, 133), Color32::from_rgb(44, 105, 165), lit));
+            (medium(18.0), Color32::WHITE, Color32::from_rgb(196, 219, 244))
         } else {
-            p.rect_stroke(rect, R_WIDGET, Stroke::new(1.0, ACCENT.gamma_multiply(0.3)), egui::StrokeKind::Inside);
-            (bold(21.0), ACCENT.gamma_multiply(0.42), FAINT)
+            p.rect_filled(rect, R_WIDGET, RAISED);
+            (medium(18.0), FAINT, FAINT)
         }
     } else {
         p.rect_filled(rect, R_WIDGET, mix(RAISED, RAISED_HI, lit));
         p.rect_stroke(rect, R_WIDGET, Stroke::new(1.0, mix(LINE_HI, Color32::from_white_alpha(60), lit)), egui::StrokeKind::Inside);
         (label(), if enabled { mix(TEXT, Color32::WHITE, lit) } else { FAINT }, DIM)
     };
-    let spacing = if primary { 1.5 } else { 0.0 };
-    let label = if primary { text.to_uppercase() } else { text.to_string() };
-    let mut job = egui::text::LayoutJob::default();
-    job.append(&label, 0.0, egui::TextFormat { font_id: font, color: col, extra_letter_spacing: spacing, ..Default::default() });
-    let g = p.layout_job(job);
-    let at = if primary { egui::pos2(rect.center().x - (g.size().x - spacing) * 0.5, rect.center().y - g.size().y * 0.5) } else { egui::pos2(rect.left() + 14.0, rect.center().y - g.size().y * 0.5) };
+    let g = p.layout_no_wrap(text.to_string(), font, col);
+    let at = if primary { rect.center() - g.size() * 0.5 } else { egui::pos2(rect.left() + 14.0, rect.center().y - g.size().y * 0.5) };
     p.galley(at, g, col);
     paint_hint(p, hint, rect.right() - 12.0, rect.center().y, if primary { 22.0 } else { 19.0 }, hc);
     resp
@@ -940,9 +936,9 @@ pub fn section(ui: &mut egui::Ui, id: &str, title: &str, summary: &str, open: bo
     ui.add_space(2.0);
 }
 
-/// The title bar of a start-screen window: a small capitalised name, then a hairline.
+/// The title of a flight planner panel.
 pub fn window_title(ui: &mut egui::Ui, s: &str) {
-    ui.label(section_text(s));
+    ui.label(RichText::new(s).font(item_title()).color(TEXT));
     ui.add_space(8.0);
 }
 

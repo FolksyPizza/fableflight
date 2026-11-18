@@ -84,7 +84,7 @@ enum Nav {
 /// The height of the instruments drawn over the flying (`flight_hud`), bottom centre.
 /// The fewest points of height the interface is laid out for (see `egui_input`).
 pub const UI_MIN_H: f32 = 860.0;
-pub const HUD_H: f32 = 226.0;
+pub const HUD_H: f32 = 238.0;
 /// and its width
 pub const HUD_W: f32 = 410.0;
 
@@ -147,8 +147,8 @@ fn attribution_default() -> &'static str {
 }
 fn attribution_rest() -> &'static str {
     t!(
-        "Elevation: Mapzen / AWS Terrain Tiles  ·  Buildings, roads, land cover & water © OpenStreetMap contributors, OpenFreeMap / © OpenMapTiles  ·  Night lights: NASA Black Marble",
-        "Relief : Mapzen / AWS Terrain Tiles  ·  Bâtiments, routes, occupation du sol et eau © contributeurs OpenStreetMap, OpenFreeMap / © OpenMapTiles  ·  Lumières nocturnes : NASA Black Marble"
+        "Elevation: Mapzen / AWS Terrain Tiles and NOAA ETOPO1  ·  Buildings, roads, land cover & water © OpenStreetMap contributors, OpenFreeMap / © OpenMapTiles  ·  Night lights: NASA Black Marble",
+        "Relief : Mapzen / AWS Terrain Tiles et ETOPO1 (NOAA)  ·  Bâtiments, routes, occupation du sol et eau © contributeurs OpenStreetMap, OpenFreeMap / © OpenMapTiles  ·  Lumières nocturnes : NASA Black Marble"
     )
 }
 
@@ -794,7 +794,31 @@ fn geocode(f: &fetch::Fetcher, q: &str) -> Option<(f64, f64, String)> {
 fn ground_elev(src: &sources::Sources, lat: f64, lon: f64) -> f64 {
     let id = geo::TileId::at(lat.to_radians(), lon.to_radians(), 11);
     let (u, v) = id.frac(lat.to_radians(), lon.to_radians());
-    src.elev(id).map(|e| e.sample(u, v) as f64).unwrap_or(0.0).max(0.0)
+    src.elev(id).map_or_else(|_| sources::fallback_height(lat.to_radians(), lon.to_radians()), |e| e.sample(u, v)).max(0.0).into()
+}
+
+/// Ease the planner's camera into the overhead holding shot while the UI fades.
+struct DepartureIntro {
+    from: DVec3,
+    elapsed: f64,
+}
+
+impl DepartureIntro {
+    const DURATION: f64 = 0.85;
+
+    fn camera(&self, to: DVec3) -> DVec3 {
+        let t = Loading::ease(self.elapsed / Self::DURATION);
+        let from_up = self.from.normalize();
+        let turn = DQuat::from_rotation_arc(from_up, to.normalize());
+        let up = DQuat::IDENTITY.slerp(turn, t) * from_up;
+        let start = (self.from.length() - geo::R).max(1.0).ln();
+        let end = (to.length() - geo::R).max(1.0).ln();
+        up * (geo::R + (start + (end - start) * t).exp())
+    }
+
+    fn menu_opacity(&self) -> f32 {
+        (1.0 - Loading::ease(self.elapsed / 0.55)) as f32
+    }
 }
 
 /// Prepare the destination at the normal flight camera before playing the descent.
@@ -809,7 +833,7 @@ struct Loading {
 impl Loading {
     const MIN: f64 = 1.2;
     const PHOTO_WAIT: f64 = 45.0;
-    const DESCENT: f64 = 4.6;
+    const DESCENT: f64 = 5.6;
 
     fn new(eye: DVec3) -> Self {
         Self { t0: Instant::now(), quiet_since: None, descent: None, descent_time: 0.0, eye }
@@ -856,11 +880,16 @@ impl Loading {
             let right = dir.cross(up).normalize();
             DQuat::from_mat3(&glam::DMat3::from_cols(right, right.cross(dir), -dir))
         };
-        let turn = smooth((t - 0.35) / 0.48);
+        let turn = smooth((t - 0.28) / 0.58);
         let attitude = orientation(-vertical, north).slerp(orientation(forward, up), turn);
-        // Approach the pilot's eye through the forward glass.
+        // A shallow lateral sweep reveals terrain relief as the horizon rises.
+        // Pull back onto the flight camera's axis before reaching the aircraft.
+        let sweep = smooth((t - 0.15) / 0.25) * (1.0 - smooth((t - 0.40) / 0.27));
+        let right = forward.cross(up).normalize();
+        let side = right * (104.0 * sweep);
         let lead = if cockpit { 22.0 * smooth((t - 0.38) / 0.25) * (1.0 - smooth((t - 0.74) / 0.26)) } else { 0.0 };
-        (vertical * (eye.length() + height) + forward * lead, attitude * DVec3::NEG_Z, attitude * DVec3::Y)
+        let pos = vertical * (eye.length() + height) + side + forward * lead;
+        (pos, attitude * DVec3::NEG_Z, attitude * DVec3::Y)
     }
 }
 
@@ -879,6 +908,50 @@ mod departure_tests {
         assert_eq!(loading.progress(), Some(0.0));
         assert!(!loading.advance_descent(ready + std::time::Duration::from_secs(4)));
         assert!((0.0..0.03).contains(&loading.progress().unwrap()));
+    }
+
+    #[test]
+    fn planner_fade_arrives_at_the_overhead_camera() {
+        let globe = geo::lla_to_pos(0.65, -2.1, 7_000_000.0);
+        let overhead = geo::lla_to_pos(0.7, -2.0, 14_000.0);
+        let mut intro = DepartureIntro { from: globe, elapsed: 0.0 };
+        assert!(intro.camera(overhead).distance(globe) < 1e-6);
+        assert_eq!(intro.menu_opacity(), 1.0);
+        intro.elapsed = DepartureIntro::DURATION * 0.5;
+        let midpoint = intro.camera(overhead);
+        assert!(midpoint.length() < globe.length() && midpoint.length() > overhead.length());
+        assert!((0.0..1.0).contains(&intro.menu_opacity()));
+        intro.elapsed = DepartureIntro::DURATION;
+        assert!(intro.camera(overhead).distance(overhead) < 1e-6);
+        assert_eq!(intro.menu_opacity(), 0.0);
+    }
+
+    #[test]
+    fn runway_assist_corrects_drift_with_manual_override() {
+        let mut p = Plane::spawn_ground(&aircraft::c172::SPEC, 0.65, -2.1, 1.0, 0.0, 0.0);
+        let runway = RunwaySteering::at(p.pos, 0.0, 45.0, 1600.0);
+        p.hold = false;
+        p.throttle = 1.0;
+        p.pos = runway.origin + runway.forward * 35.0 - runway.right * 2.0;
+        p.vel = runway.forward * 8.0 - runway.right * 0.5;
+        let mut c = Controls::default();
+        runway.apply(&p, &mut c);
+        assert!(c.yaw > 0.0 && c.yaw <= 0.30);
+        p.pos = runway.origin + runway.forward * 35.0 + runway.right * 2.0;
+        p.vel = runway.forward * 8.0 + runway.right * 0.5;
+        c.yaw = 0.0;
+        runway.apply(&p, &mut c);
+        assert!(c.yaw < 0.0 && c.yaw >= -0.30);
+        c.yaw = 0.5;
+        runway.apply(&p, &mut c);
+        assert_eq!(c.yaw, 0.5);
+        c = Controls { brake_left: 0.75, ..Default::default() };
+        runway.apply(&p, &mut c);
+        assert_eq!(c.yaw, 0.0);
+        c = Controls::default();
+        p.on_ground = false;
+        runway.apply(&p, &mut c);
+        assert_eq!(c.yaw, 0.0);
     }
 
     #[test]
@@ -905,6 +978,45 @@ mod departure_tests {
             assert!(dir.dot(up).abs() < 1e-9);
             last_height = eye.length();
         }
+    }
+}
+
+/// Centreline for the runway end selected at spawn, in Earth coordinates.
+#[derive(Clone, Copy)]
+struct RunwaySteering {
+    origin: DVec3,
+    forward: DVec3,
+    right: DVec3,
+    half_width: f64,
+    length: f64,
+}
+
+impl RunwaySteering {
+    fn at(origin: DVec3, heading: f64, width: f64, length: f64) -> Self {
+        let (east, north, up) = geo::enu(origin);
+        let forward = north * heading.cos() + east * heading.sin();
+        Self { origin, forward, right: forward.cross(up), half_width: width * 0.5, length }
+    }
+
+    fn apply(self, plane: &Plane, controls: &mut Controls) {
+        let throttle = controls.throttle_set.unwrap_or(plane.throttle);
+        if !plane.on_ground || plane.hold || throttle < 0.45 || plane.vel.length() < 2.0
+            || controls.yaw.abs() > 0.035 || controls.brake || controls.brake_left > 0.035
+            || controls.brake_right > 0.035 || controls.reverse
+        {
+            return;
+        }
+        let offset = plane.pos - self.origin;
+        let across = offset.dot(self.right);
+        let along = offset.dot(self.forward);
+        let nose = plane.forward();
+        if across.abs() > self.half_width || !(-25.0..=self.length).contains(&along) || nose.dot(self.forward) < 0.85 {
+            return;
+        }
+        let heading_error = (-nose.dot(self.right)).atan2(nose.dot(self.forward));
+        let drift = plane.vel.dot(self.right);
+        let yaw = heading_error * 2.8 - across * 0.055 - drift * 0.11 + plane.omega.y * 0.38;
+        controls.yaw = yaw.clamp(-0.30, 0.30);
     }
 }
 
@@ -1134,6 +1246,8 @@ struct Game {
     start_rx: Option<std::sync::mpsc::Receiver<(f64, f64, f64)>>,
     /// the loading screen, from the start screen into the air (see `Loading`)
     loading: Option<Loading>,
+    departure_intro: Option<DepartureIntro>,
+    menu_overlay: Vec<egui::epaint::ClippedShape>,
     scenery_cache: settings_ui::SceneryCache,
     name_rx: Option<std::sync::mpsc::Receiver<String>>,
     last_click: f64,
@@ -1176,6 +1290,8 @@ struct Game {
     radios: nav::Radios,
     /// waiting on the ground for the terrain to load: where, and until when at most
     hold_spot: Option<(f64, f64, f64)>,
+    runway_steering: Option<RunwaySteering>,
+    runway_assist: bool,
     /// the AI copilot's tool calls, and the screenshots waiting for a frame
     mcp_calls: Option<crossbeam_channel::Receiver<mcp::rpc::Call>>,
     mcp_shots: Vec<copilot::PendingShot>,
@@ -1365,8 +1481,8 @@ impl Game {
             g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, quit: false,
             mode: if args.menu.unwrap_or(true) { Mode::Menu } else { Mode::Fly }, menu, menu_go: args.menu_go, heading: args.heading.to_radians(), destr: destruct::Destruction::new(secs.to_bits()),
             sheds: damage::Sheds::default(), fx_anchor: plane.pos, fx_shift: DVec3::ZERO, smoke_acc: 0.0, flash: Vec::new(), airport_note: (String::new(), -100.0), toolbar_t: -100.0, weapon_flash: None, kills: Vec::new(), damage_spec: args.damage.clone(), wreck_dirty: false, wreck_t: 0.0, wreck_seen: 0.0,
-            start_rx: None, loading: None, scenery_cache: Default::default(), name_rx: None, last_click: -10.0, n_cars: 0, city_glow: 0.0, skyglow: Default::default(), gauges: gauges::Gauges::new(&plane, secs.to_bits()), glass, lightning, rain_field: storm::RainField::default(), cam_rain: 0.0, cam_hail: 0.0, storm_adapt: 0.0, plane, weapons,
-            airport_rx: None, hold_spot: None,
+            start_rx: None, loading: None, departure_intro: None, menu_overlay: Vec::new(), scenery_cache: Default::default(), name_rx: None, last_click: -10.0, n_cars: 0, city_glow: 0.0, skyglow: Default::default(), gauges: gauges::Gauges::new(&plane, secs.to_bits()), glass, lightning, rain_field: storm::RainField::default(), cam_rain: 0.0, cam_hail: 0.0, storm_adapt: 0.0, plane, weapons,
+            airport_rx: None, hold_spot: None, runway_steering: None, runway_assist: prefs.runway_assist,
             prefs_lang: args.lang.or(prefs.lang),
             prefs_t: 0.0,
             live: live::Live::new(prefs.live_traffic),
@@ -1735,6 +1851,7 @@ impl Game {
         self.cancel_cockpit_input();
         self.ap.disengage();
         self.hold_spot = None;
+        self.runway_steering = None;
         self.plane.parking_brake = false;
         self.mcp_throttle = None;
         self.plane = Plane::spawn(self.spec, lat, lon, alt, heading, speed);
@@ -1787,6 +1904,9 @@ impl Game {
 
     /// Hold the camera while terrain and scenery for both departure views load.
     fn update_loading(&mut self, now: Instant) {
+        if self.departure_intro.is_some() {
+            return;
+        }
         let Some(l) = self.loading.as_mut() else { return };
         if l.descent.is_some() {
             if l.advance_descent(now) {
@@ -1809,17 +1929,19 @@ impl Game {
     }
 
     fn departing(&self) -> bool {
-        self.loading.is_some() || (self.mode == Mode::Menu && self.menu.starting)
+        self.departure_intro.is_some() || self.loading.is_some() || (self.mode == Mode::Menu && self.menu.starting)
     }
 
     fn departure_ui(&mut self) -> (Vec<egui::ClippedPrimitive>, egui::TexturesDelta, f32) {
         let input = self.egui_input();
+        let opacity = self.departure_intro.as_ref().map_or(0.0, DepartureIntro::menu_opacity);
         let out = self.egui_ctx.clone().run_ui(input, |ui| {
-            if self.loading.is_none_or(|l| l.descent.is_none()) {
+            if self.loading.is_none_or(|l| l.descent.is_none()) && opacity < 1.0 {
                 egui::Area::new(egui::Id::unique("departure_spinner"))
                     .anchor(egui::Align2::LEFT_BOTTOM, [20.0, -20.0])
                     .interactable(false)
                     .show(ui.ctx(), |ui| {
+                        ui.multiply_opacity(1.0 - opacity);
                         egui::Frame::new().fill(egui::Color32::from_black_alpha(155)).corner_radius(6).inner_margin(8).show(ui, |ui| {
                             ui.add(egui::Spinner::new().size(18.0).color(egui::Color32::WHITE))
                                 .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ProgressIndicator, true, t!("Loading departure scenery", "Chargement du décor de départ")));
@@ -1831,7 +1953,20 @@ impl Game {
             }
         });
         self.egui_state.handle_platform_output(&self.window, out.platform_output);
-        (self.egui_ctx.tessellate(out.shapes, out.pixels_per_point), out.textures_delta, out.pixels_per_point)
+        let mut jobs = self.egui_ctx.tessellate(out.shapes, out.pixels_per_point);
+        if opacity > 0.0 {
+            let overlay = self.egui_ctx.tessellate(self.menu_overlay.clone(), out.pixels_per_point);
+            jobs.reserve(overlay.len());
+            for mut job in overlay {
+                if let egui::epaint::Primitive::Mesh(mesh) = &mut job.primitive {
+                    for vertex in &mut mesh.vertices {
+                        vertex.color = vertex.color.gamma_multiply(opacity);
+                    }
+                    jobs.push(job);
+                }
+            }
+        }
+        (jobs, out.textures_delta, out.pixels_per_point)
     }
 
     fn start_airport(&mut self, idx: u32, runway: Option<String>, approach: bool, keep_local: bool) {
@@ -1892,6 +2027,9 @@ impl Game {
             // On a sloping runway it stands nose up (or down) with the slope.
             let pitch = ((g.h(start + dir * 3.0) - g.h(start - dir * 3.0)) / 6.0).atan() as f64;
             self.respawn_ground(lat, lon, g.h(start) as f64, heading, pitch);
+            if self.spec.rocket().is_none() {
+                self.runway_steering = Some(RunwaySteering::at(self.plane.pos, heading, r.width.into(), r.len.into()));
+            }
             self.status = t!("{} {} · runway {} · {:.0} m × {:.0} m", "{} {} · piste {} · {:.0} m × {:.0} m", a.code(), a.name, r.ident[e], r.len, r.width);
         }
     }
@@ -2103,14 +2241,21 @@ impl Game {
         self.mouse_holds();
         let k = |c: KeyCode| self.keys.contains(&c) || self.hot_keys.contains(&c);
         let ax = |pos: bool, neg: bool| (pos as i32 - neg as i32) as f64;
+        // Digital pedals reach full deflection while taxiing. At takeoff
+        // speeds, short key taps make smaller corrections.
+        let pedal = if self.plane.on_ground {
+            1.0 - 0.6 * smoothstep(4.0, 18.0, self.plane.vel.length())
+        } else {
+            1.0
+        };
         let mut c = Controls {
             pitch: ax(k(KeyCode::KeyS) || k(KeyCode::ArrowDown), k(KeyCode::KeyW) || k(KeyCode::ArrowUp)),
             roll: ax(k(KeyCode::KeyD) || k(KeyCode::ArrowRight), k(KeyCode::KeyA) || k(KeyCode::ArrowLeft)),
-            yaw: ax(k(KeyCode::KeyE), k(KeyCode::KeyQ)),
+            yaw: ax(k(KeyCode::KeyE), k(KeyCode::KeyQ)) * pedal,
             throttle: ax(k(KeyCode::ShiftLeft) || k(KeyCode::ShiftRight), k(KeyCode::ControlLeft) || k(KeyCode::ControlRight)),
             brake: k(KeyCode::KeyB),
-            brake_left: if self.hot_press.is_some_and(|(i, _, _)| self.cockpit_controls[i].0.hold == Some("brake_left")) { 1.0 } else { 0.0 },
-            brake_right: if self.hot_press.is_some_and(|(i, _, _)| self.cockpit_controls[i].0.hold == Some("brake_right")) { 1.0 } else { 0.0 },
+            brake_left: if k(KeyCode::AltLeft) || self.hot_press.is_some_and(|(i, _, _)| self.cockpit_controls[i].0.hold == Some("brake_left")) { 1.0 } else { 0.0 },
+            brake_right: if k(KeyCode::AltRight) || self.hot_press.is_some_and(|(i, _, _)| self.cockpit_controls[i].0.hold == Some("brake_right")) { 1.0 } else { 0.0 },
             // (The game's own boost is arcade mode's; real afterburners always work.)
             boost: k(KeyCode::Space) && (self.arcade || self.spec.real_boost()),
             reverse: k(KeyCode::KeyZ),
@@ -3530,6 +3675,7 @@ impl Game {
         self.goto_rx = None;
         self.set_aircraft(aircraft::nth(self.menu.aircraft));
         self.r.want_obj_kind(self.spec.id as u32);
+        self.departure_intro = Some(DepartureIntro { from: self.menu.camera().0, elapsed: 0.0 });
         // Remembered for next time (the globe opens on it; the main menu offers it again).
         let db = airports::Db::get();
         self.last_start = Some(settings::LastStart {
@@ -4093,7 +4239,7 @@ impl Game {
 
     /// The settings worth keeping, as they are now.
     fn live_settings(&self) -> settings::Settings {
-        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, hud_cockpit: self.hud_cockpit, minimap: self.minimap.visible, landing_guidance: self.minimap.landing_guidance, arcade: self.arcade, minimap_plan: self.minimap.plan, minimap_heading_up: self.minimap.heading_up, minimap_zoom: self.minimap.zoom, minimap_size: self.minimap.size.x, minimap_height: self.minimap.size.y, taa: self.gfx.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time, last: self.last_start.clone() }
+        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, hud_cockpit: self.hud_cockpit, minimap: self.minimap.visible, landing_guidance: self.minimap.landing_guidance, runway_assist: self.runway_assist, arcade: self.arcade, minimap_plan: self.minimap.plan, minimap_heading_up: self.minimap.heading_up, minimap_zoom: self.minimap.zoom, minimap_size: self.minimap.size.x, minimap_height: self.minimap.size.y, taa: self.gfx.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time, last: self.last_start.clone() }
     }
 
     /// Saves the settings when they have changed (looked at once a second,
@@ -4156,6 +4302,13 @@ impl Game {
         }
         self.last = now;
         self.real += dt_real;
+        if let Some(intro) = &mut self.departure_intro {
+            intro.elapsed += dt_real;
+            if intro.elapsed >= DepartureIntro::DURATION {
+                self.departure_intro = None;
+                self.menu_overlay.clear();
+            }
+        }
         self.frame += 1;
         self.pump_mcp();
         if self.record.is_none() {
@@ -4291,7 +4444,17 @@ impl Game {
         }
 
         // Physics at a fixed step.
-        let c = self.controls(dt_real);
+        let mut c = self.controls(dt_real);
+        if let Some(runway) = self.runway_steering
+            && self.runway_assist && dt > 0.0 && !self.crashed
+        {
+            let height = (self.plane.pos - runway.origin).dot(self.plane.pos.normalize());
+            if !self.plane.on_ground && height > 10.0 {
+                self.runway_steering = None;
+            } else {
+                runway.apply(&self.plane, &mut c);
+            }
+        }
         let mut emit = Vec::new();
         let mut femit: Vec<(DVec3, render::Particle)> = Vec::new();
         let (mut scrape_n, mut steps) = (0usize, 0usize);
@@ -4776,7 +4939,12 @@ impl Game {
         }
         let flight_camera = (cam, dir, upv, fov);
         let preparing = self.loading.is_some_and(|l| l.descent.is_none());
-        let (cam, dir, upv) = if let Some(l) = self.loading {
+        let (cam, dir, upv) = if let Some(intro) = &self.departure_intro {
+            let eye = intro.camera(self.departure_eye());
+            let (_, north, up) = geo::enu(eye);
+            fov = 60f32.to_radians();
+            (eye, -up, north)
+        } else if let Some(l) = self.loading {
             let t = l.progress().unwrap_or(0.0);
             let ease = Loading::ease(t) as f32;
             fov = 60f32.to_radians() + (fov - 60f32.to_radians()) * ease;
@@ -4830,12 +4998,13 @@ impl Game {
         };
         let vp_jit = Mat4::from_translation(jitter.extend(0.0)) * vp;
         let frustum = world::Frustum::new(DMat4::from_cols_array(&vp.to_cols_array().map(|v| v as f64)));
-        let orbit = map_view && (self.menu.screen != menu::Screen::Fly || calt >= 800_000.0);
+        let distant_intro = self.departure_intro.is_some() && calt >= 800_000.0;
+        let orbit = distant_intro || map_view && (self.menu.screen != menu::Screen::Fly || calt >= 800_000.0);
         let focus_abs = if in_menu { cam } else if self.crashed { self.crash.as_ref().unwrap().site } else { self.plane.pos };
         if orbit {
             self.world.clear_draws();
         } else {
-            let (stream_cam, stream_frustum, stream_fov) = if preparing {
+            let (stream_cam, stream_frustum, stream_fov) = if loading {
                 let (eye, dir, up, fov) = flight_camera;
                 let vp = perspective_rev(fov, w / h, flight_near) * look_to(Vec3::ZERO, dir.as_vec3(), up.as_vec3());
                 (eye, world::Frustum::new(DMat4::from_cols_array(&vp.to_cols_array().map(f64::from))), fov)
@@ -4844,7 +5013,7 @@ impl Game {
             };
             let departure_views = self.loading.filter(|_| preparing).map(|l| {
                 let (eye, dir, up, final_fov) = flight_camera;
-                [0.0, 0.4, 0.66].map(|t| {
+                [0.0, 0.25, 0.42, 0.60, 0.76].map(|t| {
                     let (cam, direction, up) = l.camera(t, eye, dir, up, self.cam_mode == 1);
                     let fov = 60f32.to_radians() + (final_fov - 60f32.to_radians()) * Loading::ease(t) as f32;
                     let vp = perspective_rev(fov, w / h, flight_near) * look_to(Vec3::ZERO, direction.as_vec3(), up.as_vec3());
@@ -4852,13 +5021,20 @@ impl Game {
                 })
             });
             let airport = if preparing { self.menu.airport } else { None };
-            let views = departure_views.as_ref().map_or(&[][..], |views| &views[..]);
+            let current_view = (cam, frustum.clone());
+            let views = if let Some(views) = &departure_views {
+                &views[..]
+            } else if loading {
+                std::slice::from_ref(&current_view)
+            } else {
+                &[]
+            };
             self.world.update(&self.r, stream_cam, &stream_frustum, views, airport);
             let day = if in_menu { 0.0 } else { 1.0 };
             let px = h as f64 / (2.0 * (stream_fov as f64 * 0.5).tan());
             self.world.update_photo(&self.r, stream_cam, focus_abs, &stream_frustum, px, day, dt_real);
-            if preparing {
-                self.world.show_terrain_from(cam, &frustum);
+            if loading {
+                self.world.show_departure_from(cam, &frustum);
             }
         }
         if dt > 0.0 {
@@ -4907,7 +5083,7 @@ impl Game {
         self.storm_adapt += (shade * day - self.storm_adapt) * (dt_real as f32 * 0.4).min(1.0);
         // The start screen's globe from orbit is exposed for its day side
         // (common.wgsl `globe_k`), wherever the night falls on it.
-        let globe = if map_view { let k = ((calt as f32 - 150e3) / 650e3).clamp(0.0, 1.0); k * k * (3.0 - 2.0 * k) } else { 0.0 };
+        let globe = if map_view || self.departure_intro.is_some() { let k = ((calt as f32 - 150e3) / 650e3).clamp(0.0, 1.0); k * k * (3.0 - 2.0 * k) } else { 0.0 };
         let exposure = (6.0f32.ln() + (GLOBE_EXPOSURE.ln() - 6.0f32.ln()) * globe + (0.5f32.ln() - 6.0f32.ln()) * day * (1.0 - globe)).exp() * if self.cam_mode == 1 && !self.crashed && !in_menu { 2f32.powf(self.head.adapt) } else { 1.0 } * 2f32.powf(1.3 * self.storm_adapt);
         let v4 = |v: DVec3, w: f64| [v.x as f32, v.y as f32, v.z as f32, w as f32];
         let cam_right = dir.cross(upv).normalize();
@@ -4996,7 +5172,7 @@ impl Game {
             shore: [0.0; 4],
             foam: [[0.0; 4]; 16],
             // (yzw: the rain, how wet the windows are, and the airspeed over them in kt; plane.wgsl rain_water)
-            start: [if map_view { 1.0 } else if departing { -1.0 } else { 0.0 }, self.wx.rain, self.glass.wet, (self.plane.ias() * 1.94384) as f32],
+            start: [if map_view || distant_intro { 1.0 } else if departing { -1.0 } else { 0.0 }, self.wx.rain, self.glass.wet, (self.plane.ias() * 1.94384) as f32],
             stormfx: [0.0; 4],
             flash: [[0.0; 4]; 2 * storm::MAX_FLASHES],
             rain: [[0.0; 4]; 2],
@@ -5822,6 +5998,7 @@ impl Game {
         if start {
             self.begin();
         }
+        self.menu_overlay.clone_from(&out.shapes);
         let jobs = self.egui_ctx.tessellate(out.shapes, out.pixels_per_point);
         (jobs, out.textures_delta, out.pixels_per_point)
     }
@@ -6503,11 +6680,12 @@ impl Game {
                     }
                 }
                 let y = y0 - (vs_fpm / 2000.0).clamp(-1.0, 1.0) * span;
-                let col = if vs_fpm < -1500.0 && agl_ft < 2500.0 { red } else if vs_fpm.abs() < 100.0 { white } else { green };
-                painter.line_segment([pos2(vr.left() + 2.0, y0), pos2(vr.left() + 2.0, y)], Stroke::new(2.0, col.gamma_multiply(0.45)));
-                painter.rect_filled(Rect::from_min_max(pos2(vr.left() + 2.0, y - 2.5), pos2(vr.right() - 2.0, y + 2.5)), 1.0, col);
-                painter.text(pos2(vr.center().x, vr.top() - 8.0), Align2::CENTER_CENTER, "VS", mono(11.0), dim);
-                painter.text(pos2(vr.center().x, vr.bottom() + 9.0), Align2::CENTER_CENTER, format!("{:+.0}", (vs_fpm / 10.0).round() * 10.0), mono(11.0), col);
+                let col = if self.warn.pull_up { red } else if self.warn.sink { amber } else { white };
+                painter.add(Shape::convex_polygon(
+                    vec![pos2(vr.left() + 2.0, y), pos2(vr.right() - 1.0, y - 3.0), pos2(vr.right() - 1.0, y + 3.0)],
+                    col, Stroke::NONE,
+                ));
+                painter.text(pos2(vr.center().x, vr.top() - 8.0), Align2::CENTER_CENTER, "V/S", mono(11.0), dim);
             }
 
             // ---- throttle
@@ -6557,38 +6735,41 @@ impl Game {
                 ));
             }
 
-            // ---- the aircraft's state, in a row of small plates under the instruments
-            {
-                let mut chips: Vec<(String, Color32)> = Vec::new();
-                if p.spec.rocket().is_none() {
-                    let flaps = match &p.spec.lever { Some(l) => l.notches.get(p.flap_set as usize).map_or("", |n| n[0]).to_string(), None => t!("Flaps {:.0}°", "Volets {:.0}°", p.flap_notch_deg()) };
-                    chips.push((flaps, if p.flaps > 0.25 && p.ias() > p.vfe() { amber } else { dim }));
-                    if !p.spec.fixed_gear() {
-                        let (g, col) = if p.gear >= 1.0 { (t!("Gear down", "Train sorti"), green) } else if p.gear <= 0.0 { (t!("Gear up", "Train rentré"), dim) } else { (t!("Gear moving", "Train en transit"), amber) };
-                        chips.push((g.to_string(), col));
-                    }
+            // A common instrument strip for readouts that do not need a tape.
+            let fuel = p.fuel_frac() * 100.0;
+            let aoa = if ias_kt >= 10.0 { format!("{:+.1}°", p.alpha.to_degrees()) } else { "—".into() };
+            let aoa_color = if p.stalled { red } else if ias_kt >= 10.0 && p.alpha.abs() > p.stall_alpha() * 0.85 { amber } else { white };
+            let fuel_color = if fuel <= 0.0 { red } else if fuel < 10.0 { amber } else { white };
+            let vs_color = if self.warn.pull_up { red } else if self.warn.sink { amber } else { white };
+            let rate = (vs_fpm / 10.0).round() * 10.0;
+            let rate = if rate.abs() < 10.0 { "0".into() } else { format!("{rate:+.0}") };
+            let mut readouts = vec![
+                (t!("FUEL", "CARB."), format!("{fuel:.0}%"), fuel_color),
+                ("AOA", aoa, aoa_color),
+                ("FT/MIN", rate, vs_color),
+            ];
+            if p.spec.rocket().is_none() {
+                let flaps = match &p.spec.lever {
+                    Some(l) => l.notches.get(p.flap_set as usize).map_or("—", |n| n[0]).to_string(),
+                    None => format!("{:.0}°", p.flap_notch_deg()),
+                };
+                readouts.push((t!("FLAPS", "VOLETS"), flaps, if p.flaps > 0.25 && p.ias() > p.vfe() { amber } else { white }));
+                if !p.spec.fixed_gear() {
+                    let (gear, color) = if p.gear >= 1.0 { (t!("DOWN", "SORTI"), green) } else if p.gear <= 0.0 { (t!("UP", "RENTRÉ"), dim) } else { (t!("TRANSIT", "TRANSIT"), amber) };
+                    readouts.push((t!("GEAR", "TRAIN"), gear.into(), color));
                 }
-                if p.spoilers > 0.05 {
-                    chips.push(((if p.spec.chute.is_some() { t!("Chute", "Parachute") } else { t!("Speedbrake", "Aérofreins") }).to_string(), amber));
+            }
+            let strip = Rect::from_min_max(pos2(sr.left(), rect.bottom() - 30.0), pos2(tr.right(), rect.bottom()));
+            painter.rect_filled(strip, 3.0, box_fill);
+            let width = strip.width() / readouts.len() as f32;
+            for (i, (label, value, color)) in readouts.into_iter().enumerate() {
+                let left = strip.left() + width * i as f32;
+                if i > 0 {
+                    painter.line_segment([pos2(left, strip.top() + 5.0), pos2(left, strip.bottom() - 5.0)], Stroke::new(1.0, faint));
                 }
-                if self.plane.parking_brake {
-                    chips.push((t!("Parking brake", "Frein de parc").to_string(), amber));
-                }
-                if !p.running {
-                    chips.push((t!("Engine off", "Moteur arrêté").to_string(), red));
-                }
-                let font = menu::caption();
-                let gal: Vec<_> = chips.into_iter().map(|(t, col)| (painter.layout_no_wrap(t, font.clone(), col), col)).collect();
-                let total: f32 = gal.iter().map(|(g, _)| g.size().x + 16.0).sum::<f32>() + 6.0 * gal.len().saturating_sub(1) as f32;
-                let mut x = rect.center().x - total * 0.5;
-                let y = rect.bottom() - 11.0;
-                for (g, col) in gal {
-                    let r = Rect::from_min_size(pos2(x, y - 10.0), vec2(g.size().x + 16.0, 20.0));
-                    painter.rect_filled(r, menu::R_WIDGET, glass);
-                    painter.rect_stroke(r, menu::R_WIDGET, Stroke::new(1.0, col.gamma_multiply(0.45)), StrokeKind::Inside);
-                    painter.galley(pos2(r.left() + 8.0, y - g.size().y * 0.5), g, col);
-                    x = r.right() + 6.0;
-                }
+                let x = left + width * 0.5;
+                painter.text(pos2(x, strip.top() + 8.0), Align2::CENTER_CENTER, label, mono(9.5), dim);
+                painter.text(pos2(x, strip.top() + 21.0), Align2::CENTER_CENTER, value, mono(13.0), color);
             }
         });
     }
@@ -6728,69 +6909,88 @@ impl Game {
             if self.hud_on() || self.google_shown() {
                 self.credits(ctx);
             }
-            // Damage: warnings while the airframe is being overstressed, what has
-            // already broken, and a flash for each new loss.
             let p = &self.plane;
-            let mut warn: Vec<(&str, Color32)> = Vec::new();
+            let mut warn = Vec::new();
             let red = menu::BAD;
             let amber = Color32::from_rgb(255, 196, 80);
             if !self.crashed && self.show_hud {
-                if p.stalled {
-                    warn.push(("STALL", red));
-                }
-                if p.gear < 1.0 && agl < 150.0 && p.throttle < 0.35 && !p.on_ground {
-                    warn.push((if pad { "GEAR UP  (L3)" } else { "GEAR UP  (L)" }, red));
-                }
                 let w = &self.warn;
+                let mut alert = |label, color, detail| warn.push((label, color, detail));
+                let descent_rate = || format!("−{:.0} ft/min", (-vs * 196.85 / 50.0).round().max(0.0) * 50.0);
                 if w.pull_up {
-                    warn.push(("PULL UP", red));
-                } else if w.dive > 0.0 {
-                    warn.push(("NOSE DIVE", red));
+                    alert(t!("PULL UP", "REMONTÉE"), red, None);
                 } else if w.too_low {
-                    warn.push(("TOO LOW  TERRAIN", amber));
+                    alert(t!("TERRAIN", "TERRAIN"), amber, None);
+                } else if w.dive > 0.0 {
+                    let nose_low = -p.forward().dot(p.pos.normalize()).clamp(-1.0, 1.0).asin().to_degrees();
+                    if nose_low > 20.0 {
+                        alert(t!("ATTITUDE", "ASSIETTE"), red, Some(t!("{:.0}° nose low", "{:.0}° à piquer", nose_low)));
+                    } else {
+                        alert(t!("SINK RATE", "TAUX DE DESCENTE"), amber, Some(descent_rate()));
+                    }
                 } else if w.sink {
-                    warn.push(("SINK RATE", amber));
+                    alert(t!("SINK RATE", "TAUX DE DESCENTE"), amber, (vs < -1.0).then(descent_rate));
+                }
+                if p.stalled {
+                    alert(t!("STALL", "DÉCROCHAGE"), red, None);
+                }
+                if w.gear {
+                    alert(t!("GEAR UP", "TRAIN RENTRÉ"), red, None);
                 }
                 let over = p.overspeed();
-                if over > 13.0 {
-                    warn.push(("OVERSPEED  AIRFRAME BREAKING UP", red));
-                } else if over > 0.0 {
-                    warn.push(("OVERSPEED", amber));
+                if over > 0.0 {
+                    alert(t!("OVERSPEED", "SURVITESSE"), if over > 13.0 { red } else { amber }, None);
                 }
                 if p.flaps > 0.25 && speed > p.vfe() {
-                    warn.push((if p.spec.lever.is_some() { "NOSE OVERSPEED" } else { "FLAPS OVERSPEED" }, if p.dmg.flap_stress > 0.5 { red } else { amber }));
+                    let label = if p.spec.lever.is_some() { t!("NOSE OVERSPEED", "SURVITESSE DU NEZ") } else { t!("FLAPS OVERSPEED", "SURVITESSE VOLETS") };
+                    alert(label, if p.dmg.flap_stress > 0.5 { red } else { amber }, None);
                 }
                 if p.g_load.abs() > 5.0 {
-                    warn.push(("OVER G", if p.dmg.fatigue > 1.2 { red } else { amber }));
+                    alert(t!("OVER G", "FACTEUR DE CHARGE"), if p.dmg.fatigue > 1.2 { red } else { amber }, Some(format!("{:+.1} g", p.g_load)));
                 }
                 if p.fuel <= 0.0 {
-                    warn.push(("NO FUEL", red));
+                    alert(t!("NO FUEL", "PLUS DE CARBURANT"), red, None);
                 } else if p.fuel_frac() < 0.1 {
-                    warn.push(("LOW FUEL", amber));
+                    alert(t!("LOW FUEL", "CARBURANT BAS"), amber, None);
                 }
                 if !p.running && !p.on_ground {
-                    warn.push(("ENGINE OFF", red));
+                    alert(t!("ENGINE OFF", "MOTEUR ARRÊTÉ"), red, None);
                 }
                 let el = &p.sys.elec;
-                if el.master && (el.volts < 24.0 || (p.sys.fail.alternator && p.running)) {
-                    warn.push(("LOW VOLTS", amber));
+                if el.master && (el.volts < 24.0 || p.sys.fail.alternator && p.running) {
+                    alert(t!("LOW VOLTS", "TENSION BASSE"), amber, None);
                 }
                 if p.sys.fail.vacuum && !p.spec.is_jet() {
-                    warn.push(("VACUUM", amber));
+                    alert(t!("VACUUM", "DÉPRESSION"), amber, None);
                 }
                 if p.cg_excess() != 0.0 {
-                    warn.push(("CG LIMIT", amber));
+                    alert(t!("CG LIMIT", "LIMITE DE CENTRAGE"), amber, None);
+                }
+                if p.parking_brake {
+                    alert(t!("PARK BRAKE", "FREIN DE PARC"), menu::TEXT, None);
+                }
+                if p.spoilers > 0.05 {
+                    let label = if p.spec.chute.is_some() { t!("DRAG CHUTE", "PARACHUTE") } else { t!("SPEEDBRAKE", "AÉROFREINS") };
+                    alert(label, menu::TEXT, None);
                 }
             }
             let report = if self.crashed { Vec::new() } else { p.dmg.report() };
             if self.show_hud && (!warn.is_empty() || !report.is_empty()) {
-                // Warnings as annunciators: a lit plate each, red or amber, then any damage.
                 egui::Area::new(egui::Id::unique("damage")).anchor(Align2::RIGHT_TOP, [if self.info_open { -14.0 - 340.0 - 28.0 - 14.0 } else { -14.0 }, 14.0]).interactable(false).show(ctx, |ui| {
                     ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-                        ui.spacing_mut().item_spacing.y = 4.0;
-                        for (w, col) in &warn {
-                            egui::Frame::new().fill(col.gamma_multiply(0.18)).stroke(egui::Stroke::new(1.0, *col)).corner_radius(menu::R_WIDGET).inner_margin(egui::Margin::symmetric(12, 4)).show(ui, |ui| {
-                                ui.label(RichText::new(*w).font(menu::bold(19.0)).color(*col).extra_letter_spacing(1.0));
+                        if !warn.is_empty() {
+                            egui::Frame::new().fill(Color32::from_black_alpha(215)).corner_radius(3).inner_margin(egui::Margin::symmetric(9, 5)).show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                for (label, color, detail) in &warn {
+                                    ui.horizontal(|ui| {
+                                        let (mark, _) = ui.allocate_exact_size(egui::vec2(2.0, 12.0), egui::Sense::hover());
+                                        ui.painter().rect_filled(mark, 0.0, *color);
+                                        ui.label(RichText::new(*label).font(menu::data()).color(*color));
+                                        if let Some(detail) = detail {
+                                            ui.label(RichText::new(detail.as_str()).font(menu::caption()).color(menu::DIM));
+                                        }
+                                    });
+                                }
                             });
                         }
                         if !report.is_empty() {

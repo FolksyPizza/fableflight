@@ -3459,6 +3459,34 @@ mod tests {
     }
 
     #[test]
+    fn runway_assist_reduces_cessna_takeoff_drift() {
+        let world = flat_world();
+        let roll = |assisted| {
+            let heading = 0.5;
+            let mut p = Plane::spawn_ground(C172, 0.65, -2.1, 0.0, heading, 0.0);
+            let runway = crate::RunwaySteering::at(p.pos, heading, 45.0, 1800.0);
+            p.hold = false;
+            p.t = 2.0;
+            let mut furthest = 0.0_f64;
+            for _ in 0..(180 * 24) {
+                let mut c = Controls { throttle_set: Some(1.0), ..Default::default() };
+                if assisted {
+                    runway.apply(&p, &mut c);
+                }
+                assert!(p.step(1.0 / 180.0, &c, &world).is_none(), "{:?}", p.notes);
+                furthest = furthest.max((p.pos - runway.origin).dot(runway.right).abs());
+                if p.ias() * KT >= 50.0 {
+                    return furthest;
+                }
+            }
+            panic!("cessna did not reach 50 kt");
+        };
+        let manual = roll(false);
+        let assisted = roll(true);
+        assert!(assisted < manual * 0.70 && assisted < 4.0, "manual drift {manual:.2} m, assisted {assisted:.2} m");
+    }
+
+    #[test]
     fn toe_brakes_are_independent_and_parking_brake_overrides_both() {
         let world = flat_world();
         let mut p = Plane::spawn(C172, 0.6, -2.1, 1000.0, 0.0, 55.0);

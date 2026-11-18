@@ -1112,14 +1112,15 @@ impl World {
         self.in_view.clear();
     }
 
-    /// Draw the cloud-height view using ready terrain while the streaming
-    /// budget stays focused on the player's departure view.
-    pub fn show_terrain_from(&mut self, cam: DVec3, fr: &Frustum) {
+    /// Draw the camera's view while keeping the aircraft's local scenery resident.
+    pub fn show_departure_from(&mut self, cam: DVec3, fr: &Frustum) {
         let (lat, lon, alt) = geo::pos_to_lla(cam);
         let ground = self.terrain_ground(lat, lon).map_or(0.0, |g| g.h);
         self.select_terrain(cam, (lat, lon, alt.max(1.0), ground), fr, false);
-        self.draw_b.clear();
-        self.in_view.clear();
+        self.frustum = Some(fr.clone());
+        for (id, visible) in self.draw_b.iter().zip(&mut self.in_view) {
+            *visible = matches!(self.builds.get(id), Some(BSlot::Ready(b)) if fr.sphere(b.center - cam, b.radius));
+        }
     }
 
     fn select_terrain(&mut self, cam: DVec3, local: (f64, f64, f64, f64), fr: &Frustum, stream: bool) {

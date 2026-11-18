@@ -21,6 +21,7 @@ pub struct Settings {
     pub taa: bool,
     pub minimap: bool,
     pub landing_guidance: bool,
+    pub runway_assist: bool,
     /// arcade mode: the game's fun features (missiles, boost, respawn at will, weather keys)
     pub arcade: bool,
     pub minimap_plan: bool,
@@ -71,7 +72,7 @@ impl LastStart {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, hud_cockpit: false, minimap: true, landing_guidance: true, arcade: false, minimap_plan: false, minimap_heading_up: false, minimap_zoom: 12, minimap_size: 280.0, minimap_height: 280.0, taa: true, live_traffic: true, live_weather: true, real_time: true, last: None }
+        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, hud_cockpit: false, minimap: true, landing_guidance: true, runway_assist: true, arcade: false, minimap_plan: false, minimap_heading_up: false, minimap_zoom: 12, minimap_size: 280.0, minimap_height: 280.0, taa: true, live_traffic: true, live_weather: true, real_time: true, last: None }
     }
 }
 
@@ -104,6 +105,7 @@ impl Settings {
             taa: b("taa", d.taa),
             minimap: b("minimap", d.minimap),
             landing_guidance: b("landing_guidance", d.landing_guidance),
+            runway_assist: b("runway_assist", d.runway_assist),
             arcade: b("arcade", d.arcade),
             minimap_plan: b("minimap_plan", d.minimap_plan),
             minimap_heading_up: b("minimap_heading_up", d.minimap_heading_up),
@@ -130,6 +132,7 @@ impl Settings {
             "taa": self.taa,
             "minimap": self.minimap,
             "landing_guidance": self.landing_guidance,
+            "runway_assist": self.runway_assist,
             "arcade": self.arcade,
             "minimap_plan": self.minimap_plan,
             "minimap_heading_up": self.minimap_heading_up,
@@ -163,7 +166,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, hud_cockpit: true, minimap: false, landing_guidance: false, arcade: true, minimap_plan: true, minimap_heading_up: true, minimap_zoom: 15, minimap_size: 420.0, minimap_height: 300.0, taa: false, live_traffic: false, live_weather: false, real_time: false, last: Some(LastStart { lat: 37.6, lon: -122.4, name: "KSFO".into(), airport: Some("KSFO".into()), start: "approach".into(), runway: Some("28L".into()), aircraft: "c172".into() }) };
+        let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, hud_cockpit: true, minimap: false, landing_guidance: false, runway_assist: false, arcade: true, minimap_plan: true, minimap_heading_up: true, minimap_zoom: 15, minimap_size: 420.0, minimap_height: 300.0, taa: false, live_traffic: false, live_weather: false, real_time: false, last: Some(LastStart { lat: 37.6, lon: -122.4, name: "KSFO".into(), airport: Some("KSFO".into()), start: "approach".into(), runway: Some("28L".into()), aircraft: "c172".into() }) };
         assert_eq!(Settings::from_json(&s.to_json()), s);
         assert_eq!(Settings::from_json(&serde_json::json!({"last_start": {"lat": 300.0, "lon": 0.0}})).last, None);
         let legacy = Settings::from_json(&serde_json::json!({"minimap_size": 420}));

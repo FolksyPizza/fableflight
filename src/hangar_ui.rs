@@ -66,7 +66,7 @@ impl crate::Game {
                     }
                     let name_w = ui.available_width() - 34.0 - ui.spacing().item_spacing.x;
                     ui.allocate_ui_with_layout(egui::vec2(name_w, 34.0), egui::Layout::top_down(egui::Align::Center), |ui| {
-                        ui.label(menu::section_text(&t!("Aircraft  {} / {}", "Avion  {} / {}", k + 1, n)).color(DIM));
+                        ui.label(RichText::new(t!("Aircraft", "Avion")).font(menu::caption()).color(DIM));
                         ui.label(RichText::new(spec.name).font(menu::item_title()).color(Color32::WHITE));
                     });
                     if arrow(ui, 0.0).on_hover_text(t!("Next aircraft", "Avion suivant")).clicked() {

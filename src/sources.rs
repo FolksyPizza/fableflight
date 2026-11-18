@@ -1170,6 +1170,69 @@ fn globe_pixel(id: TileId, u: f64, v: f64) -> [u8; 3] {
     img.get_pixel((x.rem_euclid(1.0) * img.width() as f64) as u32, (y.clamp(0.0, 0.999_999) * img.height() as f64) as u32).0
 }
 
+/// Six-arc-minute samples of NOAA's ETOPO1 ice-surface model, stored as
+/// signed whole metres with a 32768 offset. Longitude wraps at the date line.
+pub fn fallback_height(lat: f64, lon: f64) -> f32 {
+    type Grid = image::ImageBuffer<image::Luma<u16>, Vec<u16>>;
+    static GRID: std::sync::OnceLock<Grid> = std::sync::OnceLock::new();
+    let grid = GRID.get_or_init(|| image::load_from_memory(include_bytes!("../assets/terrain-etopo1.png")).expect("bundled ETOPO1 elevation").into_luma16());
+    let (w, h) = grid.dimensions();
+    let x = (lon / std::f64::consts::TAU + 0.5).rem_euclid(1.0) * w as f64;
+    let y = (0.5 - lat / std::f64::consts::PI).clamp(0.0, 1.0) * (h - 1) as f64;
+    let (i, j) = (x.floor() as u32 % w, y.floor() as u32);
+    let (fx, fy) = (x.fract() as f32, y.fract() as f32);
+    let sample = |i, j| f32::from(grid.get_pixel(i, j).0[0]) - 32768.0;
+    let east = (i + 1) % w;
+    let south = (j + 1).min(h - 1);
+    let top = sample(i, j) * (1.0 - fx) + sample(east, j) * fx;
+    let bottom = sample(i, south) * (1.0 - fx) + sample(east, south) * fx;
+    top * (1.0 - fy) + bottom * fy
+}
+
+/// The global grid cannot resolve a runway. Keep its surface at the published
+/// airport elevation and fold it smoothly into the coarse surrounding relief.
+struct RunwayRelief {
+    start: glam::DVec3,
+    span: glam::DVec3,
+    span_sq: f64,
+    half_width: f64,
+    elevation: f32,
+    paved: bool,
+}
+
+impl RunwayRelief {
+    fn near(id: TileId) -> Vec<Self> {
+        let db = crate::airports::Db::get();
+        let (lat, lon) = id.lat_lon(0.5, 0.5);
+        let center = geo::lla_to_pos(lat, lon, 0.0);
+        let radius = id.width_m() * 0.8;
+        let mut runways = Vec::new();
+        for (i, _) in db.near(lat.to_degrees(), lon.to_degrees(), radius + 9000.0) {
+            let airport = &db.apts[i as usize];
+            for r in &airport.rwys {
+                let [Some((a, b)), Some((c, d))] = r.pos else { continue };
+                let start = geo::lla_to_pos(a.to_radians(), b.to_radians(), 0.0);
+                let span = geo::lla_to_pos(c.to_radians(), d.to_radians(), 0.0) - start;
+                let span_sq = span.length_squared();
+                if span_sq <= 1.0 {
+                    continue;
+                }
+                let runway = Self { start, span, span_sq, half_width: f64::from(r.width) * 0.5, elevation: airport.elev, paved: r.paved };
+                if runway.distance(center) < radius + runway.half_width + 350.0 {
+                    runways.push(runway);
+                }
+            }
+        }
+        runways
+    }
+
+    fn distance(&self, pos: glam::DVec3) -> f64 {
+        let offset = pos - self.start;
+        let t = (offset.dot(self.span) / self.span_sq).clamp(0.0, 1.0);
+        (offset - self.span * t).length()
+    }
+}
+
 fn fallback_imagery(id: TileId, mask: &[u8]) -> image::RgbaImage {
     // The bundled map carries continent-scale colour. Use mapped land cover
     // for local detail where it is available and keep these tiles small.
@@ -1196,6 +1259,7 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
     let img = src.imagery(id).ok().filter(|img| img.width() == img.height() && img.width().is_power_of_two());
     let (did, ox, oy, sc) = id.ancestor(DATA_ZOOM);
     let elev = src.elev(did).ok();
+    let runways = if elev.is_none() && id.z >= 10 { RunwayRelief::near(id) } else { Vec::new() };
     // Coarser tiles near an airfield take their heights from the finer,
     // levelled data too, or the two would not meet where they join.
     let (clat0, clon0) = id.lat_lon(0.5, 0.5);
@@ -1213,9 +1277,23 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
                 return e.sample(fu, fv);
             }
         }
-        elev.as_ref().map(|t| t.sample(ox + u * sc, oy + v * sc)).unwrap_or(0.0)
+        if let Some(e) = &elev {
+            return e.sample(ox + u * sc, oy + v * sc);
+        }
+        let (lat, lon) = id.lat_lon(u, v);
+        let height = fallback_height(lat, lon);
+        if runways.is_empty() {
+            return height;
+        }
+        let pos = geo::lla_to_pos(lat, lon, 0.0);
+        let nearest = runways.iter().map(|r| (r, r.distance(pos) - r.half_width)).min_by(|a, b| a.1.total_cmp(&b.1));
+        nearest.map_or(height, |(r, distance)| {
+            let t = ((distance - 75.0) / 275.0).clamp(0.0, 1.0) as f32;
+            let mix = t * t * (3.0 - 2.0 * t);
+            r.elevation + (height - r.elevation) * mix
+        })
     };
-    let mask = match src.vector(did) {
+    let mut mask = match src.vector(did) {
         Ok(vt) => ground_mask(&vt, ox, oy, sc, id.width_m()),
         // No vector data: fall back to "below sea level is ocean".
         Err(_) => {
@@ -1239,6 +1317,21 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
             m
         }
     };
+    let tiles = (1u32 << id.z) as f64;
+    for r in runways.iter().rev() {
+        let to_tile = |pos| {
+            let (lat, lon, _) = geo::pos_to_lla(pos);
+            let (u, v) = id.frac(lat, lon);
+            let u = u - ((u - 0.5) / tiles).round() * tiles;
+            [u as f32, v as f32]
+        };
+        let ends = [to_tile(r.start), to_tile(r.start + r.span)];
+        let radius = ((r.half_width + 35.0) / id.width_m() * MASK as f64) as f32;
+        let class = if r.paved { GC_PAVED } else { GC_PITCH };
+        thick_line(&ends, MASK as f32, radius, MASK, |i| {
+            mask[i * 4..i * 4 + 4].copy_from_slice(&[0, 0, class, 0]);
+        });
+    }
     let img = img.or_else(|| src.cached_parent_imagery(id)).unwrap_or_else(|| fallback_imagery(id, &mask));
     let img_size = img.width();
     let lights = NightLights::get().tile_mask(id, &mask);
@@ -1256,7 +1349,7 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
             let raw = height_at(uc, vc);
             let (mx, my) = (((uc * MASK as f64) as usize).min(MASK - 1), ((vc * MASK as f64) as usize).min(MASK - 1));
             let water = mask[(my * MASK + mx) * 4] > 127;
-            let h = if water { raw.max(0.0) } else { raw };
+            let h = if water && elev.is_none() { 0.0 } else if water { raw.max(0.0) } else { raw };
             let (lat, lon) = id.lat_lon(u, v);
             pts[j * e + i] = geo::lla_to_pos(lat, lon, h as f64) - center;
             hs[j * e + i] = (h, raw, water);
@@ -1458,5 +1551,27 @@ mod fallback_tests {
         assert!(sea.water.iter().all(|&water| water));
         assert_eq!(land.imagery[0].len(), (land.img_size * land.img_size * 4) as usize);
         assert_ne!(land.imagery[0], sea.imagery[0]);
+        assert!(sea.heights.iter().all(|&height| height == 0.0));
+        let mountains = build_tile(&src, TileId::at(46.85_f64.to_radians(), -121.76_f64.to_radians(), 9)).unwrap();
+        let high = mountains.heights.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let low = mountains.heights.iter().copied().fold(f32::INFINITY, f32::min);
+        assert!(high > 1500.0 && high - low > 300.0, "height range {low}–{high}");
+    }
+
+    #[test]
+    fn offline_runway_stays_above_the_bay() {
+        let cache = std::env::temp_dir().join(format!("fableflight-offline-{}", std::process::id()));
+        let src = Sources::new(Fetcher::new(cache, true), String::new());
+        let db = crate::airports::Db::get();
+        let airport = &db.apts[db.find("KSFO").unwrap() as usize];
+        let runway = airport.rwys.iter().find(|r| r.ident[1] == "28L").unwrap();
+        let (lat, lon) = runway.pos[1].unwrap();
+        let (lat, lon) = (lat.to_radians(), lon.to_radians());
+        let id = TileId::at(lat, lon, DATA_ZOOM);
+        let (u, v) = id.frac(lat, lon);
+        let i = (v * GRID as f64).round() as usize * GV + (u * GRID as f64).round() as usize;
+        let tile = build_tile(&src, id).unwrap();
+        assert!(!tile.water[i]);
+        assert!((tile.heights[i] - airport.elev).abs() < 1.0);
     }
 }
