@@ -5839,21 +5839,21 @@ impl Game {
                         ui.add(egui::Label::new(RichText::new(line).font(menu::caption()).color(TEXT)).wrap());
                         ui.add_space(8.0);
                     }
-                    let text = if self.menu.starting { t!("Preparing…", "Préparation…") } else { t!("Start flight", "Commencer le vol") };
-                    let ready = self.menu.pick.is_some() && !self.menu.starting;
-                    let take_off = menu::wide_button(ui, text, if ready { Hint::of("Enter", "Menu") } else { Hint::None }, true, ready);
-                    if take_off.clicked() {
-                        start = true;
+                    let separate_action = if scroll_panel { 46.0 + ui.spacing().item_spacing.y } else { 0.0 };
+                    if !scroll_panel {
+                        start |= self.start_flight_button(ui);
                     }
-                    if ready {
-                        self.pad_home_focus(&take_off);
-                    }
-                    ctx.data_mut(|d| d.insert_temp(foot_id, ui.cursor().top() - pin_top));
+                    ctx.data_mut(|d| d.insert_temp(foot_id, ui.cursor().top() - pin_top + separate_action));
                 });
                 if scroll_panel {
-                    egui::ScrollArea::vertical().max_height(available).auto_shrink([false, true]).show(ui, |ui| {
+                    let scroll_height = (available - 68.0).max(1.0);
+                    egui::ScrollArea::vertical().max_height(scroll_height).auto_shrink([false, true]).show(ui, |ui| {
                         location(ui);
                         padui::follow_focus(ui);
+                    });
+                    menu::panel().inner_margin(egui::Margin::symmetric(16, 7)).show(ui, |ui| {
+                        ui.set_width(W - 32.0);
+                        start |= self.start_flight_button(ui);
                     });
                 } else {
                     location(ui);
@@ -6001,6 +6001,16 @@ impl Game {
         self.menu_overlay.clone_from(&out.shapes);
         let jobs = self.egui_ctx.tessellate(out.shapes, out.pixels_per_point);
         (jobs, out.textures_delta, out.pixels_per_point)
+    }
+
+    fn start_flight_button(&mut self, ui: &mut egui::Ui) -> bool {
+        let ready = self.menu.pick.is_some() && !self.menu.starting;
+        let hint = if ready { Hint::of("Enter", "Menu") } else { Hint::None };
+        let button = menu::wide_button(ui, t!("Start flight", "Commencer le vol"), hint, true, ready);
+        if ready {
+            self.pad_home_focus(&button);
+        }
+        button.clicked()
     }
 
     /// The data credits for the corner of the screen (the Google Maps logo
@@ -6538,7 +6548,7 @@ impl Game {
         let pitch = fwd.dot(u).clamp(-1.0, 1.0).asin().to_degrees() as f32;
         let bank = (-right.dot(u)).atan2(up.dot(u)) as f32;
         let ias_kt = (ias * 1.94384) as f32;
-        let gs_kt = (p.vel.length() * 1.94384) as f32;
+        let gs_kt = ((p.vel - u * vs).length() * 1.94384) as f32;
         let alt_ft = (alt * 3.28084) as f32;
         let agl_ft = (agl.max(0.0) * 3.28084) as f32;
         let vs_fpm = (vs * 196.85) as f32;
