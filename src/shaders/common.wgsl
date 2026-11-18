@@ -138,6 +138,7 @@ struct Globals {
 // The start screen globe's cloud map (globeclouds.rs): cloud cover from an
 // infrared composite, equirectangular, 180°W at u = 0, 90°N at v = 0.
 @group(0) @binding(20) var t_gclouds: texture_2d<f32>;
+@group(0) @binding(21) var t_globe: texture_2d<f32>;
 
 // GPU particles (explosions, smoke, dust, spray) and their simulation constants.
 struct Particle {
@@ -154,6 +155,9 @@ struct PSim { anchor: vec4f, upv: vec4f, cam_r: vec4f, cam_u: vec4f, wind: vec4f
 struct Cascade { vp: mat4x4f };
 
 const PI = 3.14159265;
+
+// Keep in sync with renderer target allocation.
+fn cloud_pixel_divisor() -> i32 { return select(2, 4, G.quality.x > 1.5); }
 const ATM_H = 100000.0;
 const RAYLEIGH = vec3f(5.802e-6, 13.558e-6, 33.1e-6);
 const MIE_S = 3.996e-6;

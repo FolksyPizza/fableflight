@@ -17,6 +17,101 @@ use crate::menu::{self, ACCENT, DIM, TEXT};
 use crate::padui::{self, Hint};
 use crate::{bind, gmaps, i18n, t, tiles3d, Game};
 use egui::{pos2, vec2, Align, Align2, Color32, Layout, Painter, Pos2, Rect, RichText, Sense, Stroke, Ui};
+use std::{fs, io, path::Path, sync::mpsc};
+
+#[derive(Default)]
+pub(crate) struct SceneryCache {
+    job: Option<mpsc::Receiver<Result<u64, String>>>,
+    result: Option<Result<u64, String>>,
+    confirming: bool,
+}
+
+impl SceneryCache {
+    fn start(&mut self, root: &Path, clear: bool) {
+        let (tx, rx) = mpsc::channel();
+        let root = root.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(scenery_cache_files(&root, clear).map_err(|e| e.to_string()));
+        });
+        self.job = Some(rx);
+    }
+
+    fn show(&mut self, ui: &mut Ui, root: &Path) {
+        if let Some(rx) = &self.job {
+            let result = match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(t!("Cache task ended unexpectedly", "L’opération de cache s’est interrompue").to_string())),
+                Err(mpsc::TryRecvError::Empty) => None,
+            };
+            if let Some(result) = result {
+                self.result = Some(result);
+                self.job = None;
+            }
+        } else if self.result.is_none() {
+            self.start(root, false);
+        }
+        let busy = self.job.is_some();
+        row(ui, t!("Disk space", "Espace disque"), "", |ui| {
+            let status = match &self.result {
+                _ if busy => t!("Working…", "En cours…").to_string(),
+                Some(Ok(size)) => crate::bytes(*size),
+                Some(Err(e)) => t!("Could not access the cache ({e})", "Impossible d’accéder au cache ({e})", e = e),
+                None => String::new(),
+            };
+            ui.label(status);
+            ui.horizontal_wrapped(|ui| {
+                if self.confirming {
+                    if ui.button(t!("Delete cached scenery", "Supprimer le décor en cache")).clicked() {
+                        self.confirming = false;
+                        self.start(root, true);
+                    }
+                    if ui.button(t!("Cancel", "Annuler")).clicked() {
+                        self.confirming = false;
+                    }
+                } else {
+                    if ui.add_enabled(!busy, egui::Button::new(t!("Clear cache…", "Vider le cache…"))).clicked() {
+                        self.confirming = true;
+                    }
+                    if ui.add_enabled(!busy, egui::Button::new(t!("Refresh size", "Actualiser la taille"))).clicked() {
+                        self.start(root, false);
+                    }
+                }
+            });
+        });
+        let message = if self.confirming {
+            t!("Delete all downloaded scenery? Areas may be downloaded again when you revisit them.", "Supprimer tout le décor téléchargé ? Les zones pourront être retéléchargées lors de vos prochains vols.")
+        } else {
+            t!("Downloaded imagery, terrain and maps are reused on later flights. Clearing this cache preserves aircraft and settings.", "L’imagerie, le relief et les cartes téléchargés sont réutilisés lors des prochains vols. Vider le cache conserve les avions et les réglages.")
+        };
+        note(ui, message);
+    }
+}
+
+fn scenery_cache_files(root: &Path, clear: bool) -> io::Result<u64> {
+    let mut bytes = 0;
+    let mut pending: Vec<_> = ["img", "gimg", "elev", "vec", "g3d", "globe"].into_iter().map(|name| root.join(name)).collect();
+    while let Some(path) = pending.pop() {
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        if meta.is_dir() && clear {
+            match fs::remove_dir_all(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        } else if meta.is_dir() {
+            for entry in fs::read_dir(&path)? {
+                pending.push(entry?.path());
+            }
+        } else if meta.is_file() && !clear {
+            bytes += meta.len();
+        }
+    }
+    Ok(bytes)
+}
 
 /// The widest the content column gets, however wide the window.
 pub const MAX_W: f32 = 780.0;
@@ -438,6 +533,7 @@ impl Game {
 
     fn set_map(&mut self, ui: &mut Ui) {
         let g = self.src.google.clone();
+        card(ui, t!("Scenery cache", "Cache du décor"), |ui| self.scenery_cache.show(ui, &self.src.fetch.root));
         let has_key = !self.gkey.trim().is_empty();
         let need_key = t!("Enter a Google Maps Platform API key first", "Saisissez d'abord une clé API Google Maps Platform");
         card(ui, t!("Map imagery", "Imagerie cartographique"), |ui| {
@@ -708,6 +804,21 @@ fn binding_cell(ui: &mut Ui, what: Option<String>, moved: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clears_map_storage_and_preserves_other_data() {
+        let root = std::env::temp_dir().join(format!("fableflight-scenery-cache-{}", std::process::id()));
+        let scenery = root.join("img/1/0");
+        fs::create_dir_all(&scenery).unwrap();
+        fs::create_dir_all(root.join("fgaddon")).unwrap();
+        fs::write(scenery.join("0.jpg"), b"map").unwrap();
+        fs::write(root.join("fgaddon/catalog.xml"), b"catalog").unwrap();
+        assert_eq!(scenery_cache_files(&root, false).unwrap(), 3);
+        assert_eq!(scenery_cache_files(&root, true).unwrap(), 0);
+        assert!(!root.join("img").exists());
+        assert_eq!(fs::read(root.join("fgaddon/catalog.xml")).unwrap(), b"catalog");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn sections_parse_and_cycle() {

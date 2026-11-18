@@ -1,8 +1,4 @@
-//! The main menu the game boots into: the "FABLE FLIGHT" title (logo.rs,
-//! drawn by the renderer over this screen only) and three tiles side by
-//! side: Aircraft, FLY (the largest, the globe behind it) and Settings.
-//! Quit sits small in the bottom left corner. Behind it the renderer draws
-//! space alone (the menu camera looks away from the planet, see `frame`).
+//! Flight planning, aircraft selection and settings on the main screen.
 use crate::menu::{self, Screen, ACCENT, DIM, FAINT, TEXT};
 use crate::padui::{self, Hint};
 use crate::{aircraft, hangar_ui, t, tr, Game};
@@ -38,62 +34,47 @@ impl Game {
         let mut press: Option<Tile> = None;
         let mut quit = false;
         let again = self.last_start_label();
-        let rise = entrance(ctx);
         egui::Area::new(egui::Id::unique("main_menu")).order(egui::Order::Background).fixed_pos(screen.min).show(ctx, |ui| {
             let p = ui.painter().clone();
             // Darken space towards the foot of the screen, for depth.
             gradient(&p, Rect::from_min_max(pos2(screen.left(), screen.center().y), screen.max), Color32::TRANSPARENT, Color32::from_rgba_premultiplied(4, 6, 10, 200));
 
-            // The tiles: FLY in the middle and larger, the other two beside it.
-            let gap = 18.0;
-            let (fw, fh, sw, sh) = (600.0, 450.0, 300.0, 400.0);
-            let total = fw + 2.0 * sw + 2.0 * gap;
-            let top = 104.0;
-            let k = ((screen.width() - 48.0) / total).min((screen.height() - top - 84.0) / fh).min(1.05).max(0.45);
-            let (fw, fh, sw, sh, gap) = (fw * k, fh * k, sw * k, sh * k, gap * k);
-            let cy = top + (screen.height() - top - 60.0) * 0.5;
-            let x0 = screen.center().x - (fw + 2.0 * sw + 2.0 * gap) * 0.5;
-            // Each tile rises into place as the menu opens, FLY first, the sides just after.
-            let lift = |r: Rect, i: usize| r.translate(vec2(0.0, 26.0 * (1.0 - rise(i))));
-            let air = lift(Rect::from_min_size(pos2(x0, cy - sh * 0.5), vec2(sw, sh)), 1);
-            let fly = lift(Rect::from_min_size(pos2(x0 + sw + gap, cy - fh * 0.5), vec2(fw, fh)), 0);
-            let set = lift(Rect::from_min_size(pos2(x0 + sw + gap + fw + gap, cy - sh * 0.5), vec2(sw, sh)), 2);
+            let (fw, fh, sw, gap, settings_h) = (620.0, 390.0, 310.0, 16.0, 58.0);
+            let top = 95.0;
+            let below = if again.is_some() { 68.0 } else { 0.0 };
+            let k = ((screen.width() - 40.0) / (fw + sw + gap)).min((screen.height() - top - 62.0) / (fh + below)).clamp(0.32, 1.15);
+            let x = screen.center().x - (fw + sw + gap) * k * 0.5;
+            let y = screen.top() + top + ((screen.height() - top - 62.0) - (fh + below) * k).max(0.0) * 0.5;
+            let fly = Rect::from_min_size(pos2(x, y), vec2(fw, fh) * k);
+            let air = Rect::from_min_size(pos2(fly.right() + gap * k, y), vec2(sw, fh - settings_h - gap) * k);
+            let set = Rect::from_min_size(pos2(air.left(), air.bottom() + gap * k), vec2(sw, settings_h) * k);
 
-            // Tab and the d-pad go left to right: Aircraft, FLY, Settings.
-            let r = ui.interact(air, ui.scope_id().with("tile_air"), Sense::click());
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("Aircraft", "Avions")));
-            let mut pa = p.clone();
-            pa.set_opacity(rise(1));
-            aircraft_tile(&pa, air, &r, k, spec.name, &still);
-            if r.clicked() {
-                press = Some(Tile::Aircraft);
-            }
             let r = ui.interact(fly, ui.scope_id().with("tile_fly"), Sense::click());
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("Fly", "Voler")));
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("Plan a flight", "Préparer un vol")));
             self.pad_home_focus(&r);
-            let mut pf = p.clone();
-            pf.set_opacity(rise(0));
-            fly_tile(&pf, fly, &r, k, &globe);
+            fly_tile(&p, fly, &r, k, &globe);
             if r.clicked() {
                 press = Some(Tile::Fly);
             }
+            let r = ui.interact(air, ui.scope_id().with("tile_air"), Sense::click());
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("Change aircraft ({})", "Changer d’avion ({})", spec.name)));
+            aircraft_tile(&p, air, &r, k, spec.name, &still);
+            if r.clicked() {
+                press = Some(Tile::Aircraft);
+            }
             let r = ui.interact(set, ui.scope_id().with("tile_set"), Sense::click());
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("Settings", "Réglages")));
-            let mut ps = p.clone();
-            ps.set_opacity(rise(2));
-            settings_tile(&ps, set, &r, k);
+            settings_tile(&p, set, &r, k);
             if r.clicked() {
                 press = Some(Tile::Settings);
             }
 
             // Under FLY: the last flight's start, one press away.
             if let Some((place, plane)) = &again {
-                let b = Rect::from_min_size(pos2(fly.left(), fly.bottom() + 14.0 * k), vec2(fly.width(), 46.0));
+                let b = Rect::from_min_size(pos2(fly.left(), fly.bottom() + 12.0 * k), vec2(fly.width(), 46.0 * k.max(0.7)));
                 let r = ui.interact(b, ui.scope_id().with("again"), Sense::click());
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("Fly again", "Revoler")));
-                let mut pg = p.clone();
-                pg.set_opacity(rise(3));
-                again_button(&pg, b, &r, place, plane);
+                again_button(&p, b, &r, place, plane);
                 if r.clicked() {
                     press = Some(Tile::Again);
                 }
@@ -118,14 +99,15 @@ impl Game {
                 let mut f = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_center_size(pos2(screen.center().x, foot_y), vec2(360.0, 28.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
                 padui::prompts(&mut f, &[("Dpad", tr("move")), ("A", tr("press"))], 20.0, 12.5, DIM);
             }
-            p.text(pos2(screen.right() - 24.0, foot_y), Align2::RIGHT_CENTER, t!("Globe: Esri, Maxar, Earthstar Geographics · night lights NASA Black Marble · clouds Live Cloud Maps", "Globe : Esri, Maxar, Earthstar Geographics · lumières NASA Black Marble · nuages Live Cloud Maps"), FontId::proportional(11.5), FAINT);
+            p.text(pos2(screen.right() - 20.0, screen.bottom() - 10.0), Align2::RIGHT_BOTTOM,
+                t!("Globe preview © Esri, Maxar, Earthstar · NASA Black Marble · Live Cloud Maps", "Aperçu du globe © Esri, Maxar, Earthstar · NASA Black Marble · Live Cloud Maps"),
+                FontId::proportional(10.0), FAINT);
         });
         match press {
             Some(Tile::Fly) => self.menu.screen = Screen::Fly,
             Some(Tile::Aircraft) => self.open_aircraft(hangar_ui::Tab::Mine, Screen::Main),
             Some(Tile::Settings) => self.menu.screen = Screen::Settings,
             Some(Tile::Again) => {
-                // (over the globe, whose take-off button shows it preparing)
                 self.restore_last_start();
                 self.menu.screen = Screen::Fly;
                 self.begin();
@@ -138,25 +120,6 @@ impl Game {
         if quit {
             self.quit = true;
         }
-    }
-}
-
-/// How far each tile has risen into place (0..1, eased) since the menu
-/// was last opened: `rise(i)` for the i-th tile, each a beat after the one before.
-fn entrance(ctx: &egui::Context) -> impl Fn(usize) -> f32 {
-    let now = ctx.input(|i| i.time);
-    let id = egui::Id::unique("main_menu_entrance");
-    let (start, seen) = ctx.data(|d| d.get_temp::<(f64, f64)>(id)).unwrap_or((now, f64::NEG_INFINITY));
-    // Away for more than a moment: play it again.
-    let start = if now - seen > 0.3 { now } else { start };
-    ctx.data_mut(|d| d.insert_temp(id, (start, now)));
-    let t = (now - start) as f32;
-    if t < 1.0 {
-        ctx.request_repaint();
-    }
-    move |i: usize| {
-        let x = ((t - 0.07 * i as f32) / 0.55).clamp(0.0, 1.0);
-        1.0 - (1.0 - x).powi(4)
     }
 }
 
@@ -176,8 +139,15 @@ fn again_button(p: &Painter, r: Rect, resp: &egui::Response, place: &str, plane:
     p.line(pts, Stroke::new(1.8, col));
     p.add(egui::Shape::convex_polygon(vec![end + vec2(3.5, -3.5), end + vec2(4.0, 3.0), end + vec2(-2.5, 1.5)], col, Stroke::NONE));
     p.text(pos2(r.left() + 44.0, r.center().y), Align2::LEFT_CENTER, t!("Fly again", "Revoler"), menu::label(), menu::mix(TEXT, Color32::WHITE, lit));
-    let g = p.layout_no_wrap(format!("{place}  ·  {plane}"), menu::caption(), DIM);
-    p.galley(pos2(r.right() - 16.0 - g.size().x, r.center().y - g.size().y * 0.5), g, DIM);
+    let right = Rect::from_min_max(pos2(r.left() + 125.0, r.top()), r.right_bottom() - vec2(16.0, 0.0));
+    if right.width() > 40.0 {
+        let font = menu::caption();
+        let mut job = egui::text::LayoutJob::simple_singleline(format!("{place}  ·  {plane}"), font, DIM);
+        job.wrap.max_width = right.width();
+        job.wrap.max_rows = 1;
+        let g = p.layout_job(job);
+        p.galley(pos2(right.right() - g.size().x, r.center().y - g.size().y * 0.5), g, DIM);
+    }
 }
 
 /// The frame every tile shares: a dark fill, a hairline border, and when
@@ -191,9 +161,9 @@ fn tile_frame(p: &Painter, r: Rect, lit: f32, fill: bool) {
 
 /// The caption of a side tile: its name in the display face, a dim line under it.
 fn caption(p: &Painter, r: Rect, k: f32, lit: f32, title: &str, sub: &str) {
-    let y = r.bottom() - 74.0 * k.max(0.7);
-    spaced(p, pos2(r.left() + 24.0 * k, y), Align2::LEFT_BOTTOM, &title.to_uppercase(), menu::bold(30.0 * k.max(0.7)), menu::mix(TEXT, Color32::WHITE, lit), 2.5 * k);
-    p.text(pos2(r.left() + 25.0 * k, y + 8.0), Align2::LEFT_TOP, sub, menu::label(), menu::mix(DIM, TEXT, lit));
+    let y = r.bottom() - 47.0 * k;
+    p.text(pos2(r.left() + 22.0 * k, y), Align2::LEFT_BOTTOM, title, menu::bold(34.0 * k), menu::mix(TEXT, Color32::WHITE, lit));
+    p.text(pos2(r.left() + 22.0 * k, y + 7.0 * k), Align2::LEFT_TOP, sub, menu::medium(17.0 * k), menu::mix(DIM, TEXT, lit));
 }
 
 /// Aircraft: the aircraft you will fly, large, easing forward when hovered.
@@ -208,17 +178,15 @@ fn aircraft_tile(p: &Painter, r: Rect, resp: &egui::Response, k: f32, name: &str
     let w = r.width() * 0.98;
     let pic = Rect::from_center_size(c + vec2(5.0 * lit, -4.0 * lit) * k, vec2(w, w * 392.0 / 680.0));
     clip.image(still.id(), pic, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-    caption(p, r, k, lit, t!("Aircraft", "Avions"), name);
+    caption(&clip, r, k, lit, name, t!("Change aircraft", "Changer d’avion"));
 }
 
-/// Settings: a cog that turns a little when hovered.
 fn settings_tile(p: &Painter, r: Rect, resp: &egui::Response, k: f32) {
     let lit = menu::ease(p.ctx(), resp.id, resp.hovered() || resp.has_focus());
     tile_frame(p, r, lit, true);
-    let c = pos2(r.center().x, r.top() + r.height() * 0.38);
-    p.circle_stroke(c, 72.0 * k, Stroke::new(1.0, Color32::from_white_alpha((14.0 + 16.0 * lit) as u8)));
-    gear_icon_turned(p, c, 92.0 * k, menu::mix(Color32::from_rgb(200, 207, 218), Color32::WHITE, lit), lit * std::f32::consts::TAU / 16.0);
-    caption(p, r, k, lit, t!("Settings", "Réglages"), t!("Graphics · sound · controls", "Graphismes · son · commandes"));
+    let c = pos2(r.left() + 28.0 * k, r.center().y);
+    gear_icon_turned(p, c, 21.0 * k, menu::mix(DIM, Color32::WHITE, lit), 0.0);
+    p.text(c + vec2(21.0 * k, 0.0), Align2::LEFT_CENTER, t!("Settings", "Réglages"), menu::medium(20.0 * k), TEXT);
 }
 
 /// FLY: the globe picture filling it (easing in a little when hovered),
@@ -248,15 +216,14 @@ fn fly_tile(p: &Painter, r: Rect, resp: &egui::Response, k: f32, globe: &egui::T
     gradient(p, Rect::from_min_max(pos2(inner.left(), inner.top() + inner.height() * 0.5), inner.max), Color32::TRANSPARENT, Color32::from_black_alpha(180));
     tile_frame(p, r, lit, false);
     let x = r.left() + 32.0 * k;
-    let base = r.bottom() - 36.0 * k;
-    spaced(p, pos2(x - 3.0, base - 30.0 * k), Align2::LEFT_BOTTOM, t!("FLY", "VOLER"), menu::bold(112.0 * k.max(0.6)), menu::mix(Color32::WHITE, ACCENT, lit), 5.0 * k);
-    p.text(pos2(x, base - 8.0 * k), Align2::LEFT_CENTER, t!("Pick a place on the globe and take off", "Choisissez un lieu sur le globe et décollez"), menu::medium(16.5), Color32::from_rgb(220, 226, 234));
-    // its key or button, bottom right, on a key cap
+    let base = r.bottom() - 31.0 * k;
+    p.text(pos2(x, base - 20.0 * k), Align2::LEFT_BOTTOM, t!("Plan a flight", "Préparer un vol"), menu::bold(67.0 * k), menu::mix(Color32::WHITE, ACCENT, lit));
+    p.text(pos2(x, base), Align2::LEFT_CENTER, t!("Choose a departure on the globe", "Choisissez un départ sur le globe"), menu::medium(18.0 * k), Color32::from_rgb(220, 226, 234));
     let hc = Color32::from_white_alpha(190);
     match Hint::of("Enter", "A") {
         Hint::Text(h) => {
             let g = p.layout_no_wrap(h.to_string(), FontId::monospace(11.5), hc);
-            let cap = Rect::from_min_size(pos2(r.right() - 28.0 * k - g.size().x - 14.0, base - 8.0 * k - 11.0), vec2(g.size().x + 14.0, 22.0));
+            let cap = Rect::from_min_size(pos2(r.right() - 16.0 * k - g.size().x - 14.0, r.top() + 16.0 * k), vec2(g.size().x + 14.0, 22.0));
             p.rect_filled(cap, menu::R_WIDGET, Color32::from_white_alpha(18));
             p.rect_stroke(cap, menu::R_WIDGET, Stroke::new(1.0, Color32::from_white_alpha(46)), egui::StrokeKind::Inside);
             p.galley(cap.center() - g.size() * 0.5, g, hc);
@@ -264,21 +231,10 @@ fn fly_tile(p: &Painter, r: Rect, resp: &egui::Response, k: f32, globe: &egui::T
         Hint::Pad(spec) => {
             let h = 22.0;
             let w = padui::spec_width(p, spec, h);
-            padui::paint_spec(p, r.right() - 26.0 * k - w, base - 8.0 * k, spec, h, hc);
+            padui::paint_spec(p, r.right() - 16.0 * k - w, r.top() + 16.0 * k + h * 0.5, spec, h, hc);
         }
         Hint::None => {}
     }
-}
-
-/// Text with extra space between the letters.
-fn spaced(p: &Painter, at: Pos2, align: Align2, text: &str, font: FontId, col: Color32, spacing: f32) {
-    let mut job = egui::text::LayoutJob::default();
-    job.append(text, 0.0, egui::TextFormat { font_id: font, color: col, extra_letter_spacing: spacing, ..Default::default() });
-    let g = p.layout_job(job);
-    // (the spacing trails the last letter too: leave it out of the centring)
-    let size = g.size() - vec2(spacing, 0.0);
-    let r = align.anchor_size(at, size);
-    p.galley(r.min, g, col);
 }
 
 /// A horizontal gradient over a rectangle, `left` to `right`.

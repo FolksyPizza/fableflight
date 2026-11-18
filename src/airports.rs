@@ -101,6 +101,16 @@ fn surface(s: &str, kind: u8, len: f32, lighted: bool) -> (bool, bool) {
     }
 }
 
+fn runway_class(paved: bool, len: f32, kind: u8) -> u8 {
+    if !paved {
+        0
+    } else if len >= 1500.0 && (kind == 2 || (kind == 1 && len >= 1800.0)) {
+        2
+    } else {
+        u8::from(len >= 1000.0 || kind >= 1)
+    }
+}
+
 impl Db {
     pub fn get() -> &'static Db {
         static DB: OnceLock<Db> = OnceLock::new();
@@ -678,10 +688,6 @@ pub fn build_geo(src: &Sources, idx: u32) -> Result<Geo> {
             }
         }
     }
-    if got == 0 {
-        return Err(anyhow!("no map tiles for {}", apt.ident));
-    }
-
     // ---- runways: the pieces of each one, cut up by the tiles, joined again
     let mut runways: Vec<Runway> = Vec::new();
     let mut used = vec![false; rw_pieces.len()];
@@ -778,17 +784,33 @@ pub fn build_geo(src: &Sources, idx: u32) -> Result<Geo> {
             disp.swap(0, 1);
         }
         let lighted = meta.lighted || apt.kind == 2;
-        let class = if !meta.paved {
-            0
-        } else if len >= 1500.0 && (apt.kind == 2 || (apt.kind == 1 && len >= 1800.0)) {
-            2
-        } else if len >= 1000.0 || apt.kind >= 1 {
-            1
-        } else {
-            0
-        };
+        let class = runway_class(meta.paved, len, apt.kind);
         let thr = [disp[0].clamp(0.0, len * 0.3), disp[1].clamp(0.0, len * 0.3)];
         runways.push(Runway { a, b, dir, len, width: meta.width, ident: [ids[0].clone(), ids[1].clone()], thr, paved: meta.paved, concrete: meta.concrete, lighted, class });
+    }
+    // Keep runway ends offered by the flight planner when vector data is
+    // missing or incomplete, using the bundled OurAirports coordinates.
+    for db_runway in &apt.rwys {
+        let [Some((lat_a, lon_a)), Some((lat_b, lon_b))] = db_runway.pos else { continue };
+        let ids = db_runway.ident.each_ref().map(|id| norm_ident(id));
+        if runways.iter().any(|r| r.ident.iter().any(|id| !id.is_empty() && ids.contains(&norm_ident(id)))) {
+            continue;
+        }
+        let a = to_local(lat_a.to_radians(), lon_a.to_radians());
+        let b = to_local(lat_b.to_radians(), lon_b.to_radians());
+        let len = (b - a).length();
+        if !len.is_finite() || len < 150.0 {
+            continue;
+        }
+        runways.push(Runway {
+            a, b, dir: (b - a) / len, len, width: db_runway.width,
+            ident: db_runway.ident.clone(), thr: db_runway.disp.map(|d| d.clamp(0.0, len * 0.3)),
+            paved: db_runway.paved, concrete: db_runway.concrete, lighted: db_runway.lighted || apt.kind == 2,
+            class: runway_class(db_runway.paved, len, apt.kind),
+        });
+    }
+    if got == 0 && runways.is_empty() {
+        return Err(anyhow!("no map tiles or runway coordinates for {}", apt.ident));
     }
     // The longest first: it is "the" runway where one is asked for.
     runways.sort_by(|a, b| (b.paved, b.len).partial_cmp(&(a.paved, a.len)).unwrap());
@@ -1173,6 +1195,19 @@ pub fn geo_for(src: &Sources, idx: u32) -> Result<std::sync::Arc<Geo>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cold_offline_airport_keeps_the_selected_runway_end() {
+        let path = std::env::temp_dir().join(format!("fableflight-airport-offline-{}", std::process::id()));
+        let src = Sources::new(crate::fetch::Fetcher::new(path, true), String::new());
+        let airport = Db::get().find("KSFO").unwrap();
+        let field = build_geo(&src, airport).unwrap();
+        let r = field.runways.iter().find(|r| r.ident == ["28L", "10R"] || r.ident == ["10R", "28L"]).unwrap();
+        let end = usize::from(r.ident[1] == "28L");
+        let (_, direction) = r.end(end);
+        assert!((250.0..=310.0).contains(&bearing(direction)));
+        assert!(r.paved && r.len > 3000.0);
+    }
 
     /// `AIRPORT=KSFO cargo test --release geo_report -- --ignored --nocapture`
     /// builds an airfield from the (cached or fetched) map tiles and writes a

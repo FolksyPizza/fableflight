@@ -34,6 +34,36 @@ running
 cargo run --release
 ```
 
+To install the executable from this checkout, run `cargo install --path . --locked --bin fablegame`, then launch it with `fablegame`.
+
+## First flight
+
+Open **Plan a flight**, choose an airport or pick a point on the globe, then select your aircraft. Choosing an airport shows its runway ends, lengths and surfaces. Choose a specific runway or let the simulator choose one into the wind. You can start on the runway, on final approach, or overhead. If detailed airport data is missing, runways with bundled coordinates are still available.
+
+Select **Start flight** to move to the view above the departure area. A small spinner stays in the lower-left corner while the simulator builds and uploads nearby terrain along the descent path and scenery around the aircraft. Once those map loads finish, the spinner disappears and the camera descends into the cockpit or chase view. The descent takes about five seconds at normal frame rates and slows through long frames to keep the camera from jumping ahead. Press Enter during the descent to go straight to the aircraft. Missing data uses cached or generated scenery. Optional Google 3D imagery can continue streaming if its provider is slow.
+
+The 5400 × 2700 globe image is built into the executable. FableFlight generates terrain and scenery from its default imagery, elevation and vector sources with Google Maps turned off. If imagery is unavailable, it can still draw terrain using the bundled globe and any available land-cover and elevation data. A fresh offline install has coarse land colours and simplified ground heights until detailed data has been cached. [Blue Marble Next Generation, NASA Earth Observatory](https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/base-topography/)
+
+## Graphics on Apple silicon
+
+Native Apple silicon builds start on **Low** with a fresh graphics configuration. Low renders the scene at 60% of the window resolution, launches about one-quarter as many cloud rays as the other presets at the same scene resolution, and uses the base terrain mesh. The interface renders at window resolution. With a saved configuration, choose **Low** in **Settings → Graphics** or compare another preset for a single run using `cargo run --release -- --graphics low --fps-log`. The log includes the adapter and rendering backend, internal resolution, average FPS and slowest frame. Compare presets at the same location, weather, view and window size after scenery has settled.
+
+## Storage and removal
+
+FableFlight keeps downloaded imagery, elevation and map tiles for reuse. To free that space and keep the game, open **Settings → Map and data → Scenery cache → Clear cache**. The game may download scenery again as you fly. If enabled, Google’s 3D tile cache also follows the provider’s expiry and size limits.
+
+To remove FableFlight and its data, quit the game first. Run `cargo uninstall fablegame` if you installed it with Cargo. If you built it from source, remove the checkout’s `target` directory to remove the build, or remove the entire checkout if you no longer need it. If you copied the executable elsewhere, delete that copy too.
+
+Remove the following FableFlight folders to delete downloaded maps and materials, settings, bindings, the saved Google API key, downloaded aircraft and app-managed captures. Back up any custom aircraft or captures you want to keep.
+
+| Platform | Cache | Settings and user data |
+| --- | --- | --- |
+| macOS | `~/Library/Caches/fablegame` | `~/Library/Application Support/fablegame` |
+| Linux | `${XDG_CACHE_HOME:-$HOME/.cache}/fablegame` | `${XDG_CONFIG_HOME:-$HOME/.config}/fablegame` and `${XDG_DATA_HOME:-$HOME/.local/share}/fablegame` |
+| Windows | `%LOCALAPPDATA%\fablegame` | `%APPDATA%\fablegame` |
+
+F12 screenshots go to the working directory. Remove screenshots, recordings and exports saved to paths you chose separately. If you used the JSBSim comparison commands, the system temporary directory may also contain `fablegame-jsbsim-compare`.
+
 # Arcade mode
 FableFlight is a simulator first: by default, the aircraft fly as they really do. **Arcade mode** (Settings › General, or `--arcade` for one run) turns on the game's fun features:
 - the F/A-18's Sidewinders (master arm, lock and fire on keys 3, 4 and 5);

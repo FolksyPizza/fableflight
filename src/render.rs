@@ -14,14 +14,16 @@ const CLOUD_DIST: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 /// Share of each pixel's light that is ambient (sky and bounce), and the
 /// ambient occlusion that darkens it.
 pub(crate) const AMB: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
-/// Side of the sun's shadow map unless the graphics settings say otherwise
-/// (`Renderer::set_shadow_res`; the shaders read the size off the texture).
-const SHADOW_RES: u32 = 4096;
 pub const CASCADES: usize = 3;
 /// g-buffer msaa samples, 4 or 2 on low, set once at startup.
 static MSAA_N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(4);
 pub(crate) fn msaa() -> u32 {
     MSAA_N.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// Keep in sync with cloud_pixel_divisor in common.wgsl.
+fn cloud_divisor(step: f32) -> u32 {
+    if step > 1.5 { 4 } else { 2 }
 }
 const MAX_INST: usize = 16384;
 const MAX_FALL: usize = 4096;
@@ -837,6 +839,7 @@ struct Targets {
 }
 
 pub struct Renderer {
+    ao_clear: bool,
     gpu_timer: Option<crate::gputime::GpuTimer>,
     ground_mats: GroundMats,
     pub device: wgpu::Device,
@@ -847,7 +850,7 @@ pub struct Renderer {
     pub headless: bool,
     /// a GPU that shares the CPU's memory and power (Apple silicon, laptop
     /// chips): the defaults trade a little for speed there
-    pub integrated: bool,
+    integrated: bool,
     pub queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
@@ -866,7 +869,7 @@ pub struct Renderer {
     /// ambient occlusion on (off: the AO texture is cleared to unoccluded)
     pub ao: bool,
     /// cloud raymarch step length relative to High (clouds.wgsl)
-    pub cloud_step: f32,
+    cloud_step: f32,
     casc_ub: wgpu::Buffer,
     bg_casc: wgpu::BindGroup,
     bg_tileu: wgpu::BindGroup,
@@ -1102,6 +1105,7 @@ struct Bg0Src {
     shore: wgpu::TextureView,
     glow: wgpu::TextureView,
     gclouds: wgpu::TextureView,
+    globe: wgpu::TextureView,
 }
 
 impl Bg0Src {
@@ -1134,6 +1138,7 @@ impl Bg0Src {
                 tex_res(18, &self.shore),
                 tex_res(19, &self.glow),
                 tex_res(20, &self.gclouds),
+                tex_res(21, &self.globe),
             ],
         })
     }
@@ -1161,14 +1166,18 @@ pub(crate) fn view(t: &wgpu::Texture) -> wgpu::TextureView {
 
 /// Upload a full mip chain for a square texture.
 fn upload_mips(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, size: u32, format: wgpu::TextureFormat, bpp: u32, mips: &[Vec<u8>]) -> wgpu::TextureView {
-    let t = make_tex(device, label, size, size, 1, mips.len() as u32, format, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+    upload_mips_rect(device, queue, label, (size, size), format, bpp, mips)
+}
+
+fn upload_mips_rect(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, (width, height): (u32, u32), format: wgpu::TextureFormat, bpp: u32, mips: &[Vec<u8>]) -> wgpu::TextureView {
+    let t = make_tex(device, label, width, height, 1, mips.len() as u32, format, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
     for (i, m) in mips.iter().enumerate() {
-        let s = (size >> i).max(1);
+        let (w, h) = ((width >> i).max(1), (height >> i).max(1));
         queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &t, mip_level: i as u32, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             m,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(s * bpp), rows_per_image: Some(s) },
-            wgpu::Extent3d { width: s, height: s, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * bpp), rows_per_image: Some(h) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
     }
     view(&t)
@@ -1469,19 +1478,26 @@ fn wave_texture() -> Vec<u8> {
 }
 
 impl Renderer {
-    pub async fn new(window: Arc<winit::window::Window>, vsync: bool, samples: u32) -> anyhow::Result<Self> {
+    pub async fn new(window: Arc<winit::window::Window>, gfx: &mut crate::graphics::Graphics, auto_scale: bool, scale_override: Option<f32>) -> anyhow::Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance.create_surface(window.clone())?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, force_fallback_adapter: false, compatible_surface: Some(&surface), ..Default::default() })
             .await?;
         let info = adapter.get_info();
-        log::info!("GPU: {} ({:?})", info.name, info.device_type);
+        log::info!("GPU: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
         let integrated = info.device_type == wgpu::DeviceType::IntegratedGpu;
+        let msaa_override = std::env::var("FABLE_MSAA").ok().and_then(|v| v.parse().ok());
+        let samples = msaa_override.unwrap_or_else(|| gfx.samples());
+        if let Some(scale) = scale_override {
+            gfx.scale = scale;
+        } else if auto_scale && integrated {
+            gfx.scale = gfx.scale.min(0.75);
+        }
         // Intel integrated GPUs hang (i915 "GPU HANG ... context reset", then a lost
         // device) within a minute of the start screen at 4x; 2x runs clean (seen on
         // Alder Lake with Mesa 25.3). FABLE_MSAA still forces a sample count.
-        let samples = if integrated && info.vendor == 0x8086 && std::env::var_os("FABLE_MSAA").is_none() { samples.min(2) } else { samples };
+        let samples = if integrated && info.vendor == 0x8086 && msaa_override.is_none() { samples.min(2) } else { samples };
         // 4x is always supported, other counts need adapter format features.
         let afeat = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
         let ok = samples == 4 || (adapter.features().contains(afeat) && [HDR, AMB, DEPTH].iter().all(|f| adapter.get_texture_format_features(*f).flags.sample_count_supported(samples)));
@@ -1495,7 +1511,7 @@ impl Renderer {
         let mut config = surface.get_default_config(&adapter, size.width.max(1), size.height.max(1)).ok_or_else(|| anyhow::anyhow!("surface unsupported"))?;
         let caps = surface.get_capabilities(&adapter);
         config.format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
-        config.present_mode = if vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
+        config.present_mode = if gfx.vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
         surface.configure(&device, &config);
         log::info!("surface {:?}, final passes {}", config.format, if direct_out(&config) { "straight to it" } else { "via a blit" });
 
@@ -1587,7 +1603,8 @@ impl Renderer {
         // No cloud shadow (all zeros) for the passes that draw it or run before it.
         let no_cs = make_tex(d, "no cloud shadow", 1, 1, 1, 1, CS_FMT, rt).create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
         let arr = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
-        let (shadow_all, shadow) = make_shadow(d, SHADOW_RES);
+        let shadow_res = gfx.shadow_res();
+        let (shadow_all, shadow) = make_shadow(d, shadow_res);
         let dummy_depth = arr(&make_tex(d, "dummy depth", 1, 1, 1, 1, DEPTH, rt));
         let vol3 = |label: &str, n: [u32; 3]| {
             d.create_texture(&wgpu::TextureDescriptor {
@@ -1653,6 +1670,7 @@ impl Renderer {
                 tex_entry(18, d2, false),
                 tex_entry(19, d2, false),
                 tex_entry(20, d2, false),
+                tex_entry(21, d2, false),
             ],
         });
         // Coverage of the photorealistic 3D tiles, seen from above (tiles3d.rs).
@@ -1664,6 +1682,10 @@ impl Renderer {
         // (cleared to zero: no clouds until a map comes in)
         let gclouds_tex = make_tex(d, "globe clouds", crate::globeclouds::W, crate::globeclouds::H, 1, 1, wgpu::TextureFormat::R8Unorm, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
         let gclouds_view = view(&gclouds_tex);
+        let earth = crate::sources::globe_image();
+        let (gw, gh) = earth.dimensions();
+        let rgba = crate::sources::NightLights::get().globe_rgba(earth);
+        let globe = upload_mips_rect(d, &queue, "Blue Marble", (gw, gh), wgpu::TextureFormat::Rgba8UnormSrgb, 4, &crate::sources::mip_chain_rect(rgba, gw as usize, gh as usize, 4));
         let no_mask = view(&make_tex(d, "no photo mask", 1, 1, 1, 1, PHOTO_MASK_FMT, rt));
         let make_bg0 = |sky: &wgpu::TextureView, trans: &wgpu::TextureView, ms: &wgpu::TextureView, sh: &wgpu::TextureView, vl: &wgpu::TextureView, pm: &wgpu::TextureView, cs: &wgpu::TextureView| {
             d.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1691,6 +1713,7 @@ impl Renderer {
                     tex_res(18, &shore.view),
                     tex_res(19, &glow_view),
                     tex_res(20, &gclouds_view),
+                    tex_res(21, &globe),
                 ],
             })
         };
@@ -1699,7 +1722,7 @@ impl Renderer {
         let bg0_src = Bg0Src {
             layout: l0.clone(), ub: globals_ub.clone(), trans: lut_trans.clone(), ms: lut_ms.clone(), sky: lut_sky.clone(), noise: noise.clone(), wave: wave.clone(),
             s_clamp: s_clamp.clone(), s_repeat: s_repeat.clone(), s_shadow: s_shadow.clone(), s_aniso: s_aniso.clone(), vol: vol_light.clone(), det_alb: det_alb.clone(), det_nrm: det_nrm.clone(),
-            s_detail: s_detail.clone(), mask: photo_mask.clone(), cs: cs_mix.clone(), ocean: ocean.view.clone(), shore: shore.view.clone(), glow: glow_view.clone(), gclouds: gclouds_view.clone(),
+            s_detail: s_detail.clone(), mask: photo_mask.clone(), cs: cs_mix.clone(), ocean: ocean.view.clone(), shore: shore.view.clone(), glow: glow_view.clone(), gclouds: gclouds_view.clone(), globe: globe.clone(),
         };
         // Variant for passes that render into the LUTs / shadow map / smoke volume / photo mask / cloud shadow themselves.
         let bg0_pre = make_bg0(&black, &lut_trans, &lut_ms, &dummy_depth, &dummy_vol, &no_mask, &no_cs);
@@ -2198,8 +2221,10 @@ impl Renderer {
         let fluid = crate::fluid::FluidGpu::new(d, &l0, common, &vol_acc);
 
         let egui = egui_wgpu::Renderer::new(d, out_format(&config), egui_wgpu::RendererOptions::default());
-        let targets = Self::make_targets(d, &config, (config.width, config.height), &l_dres, &l_ao, &l_composite, &l_cloud, &l_cloud_apply, &l_cloud_temporal, &l_post, &l_pdraw, &l_glass, &psim_ub, &pbuf, &black);
-        let fluid_t = fluid.draw_targets(d, &targets.depth, config.width, config.height);
+        let (w, h) = Self::scaled_size(d, &config, gfx.scale);
+        log::info!("Scene: {w}x{h}, window {}x{}, shadows {}, AO {}", config.width, config.height, gfx.shadows.name(), gfx.ao);
+        let targets = Self::make_targets(d, &config, (w, h), cloud_divisor(gfx.cloud_step()), &l_dres, &l_ao, &l_composite, &l_cloud, &l_cloud_apply, &l_cloud_temporal, &l_post, &l_pdraw, &l_glass, &psim_ub, &pbuf, &black);
+        let fluid_t = fluid.draw_targets(d, &targets.depth, w, h);
         // The transmittance and multi-scatter tables depend only on the planet
         // and the haze: bake them now, and again whenever the haze changes.
         let lut_bake = LutBake { p_trans, p_ms, bg_trans: bg0_boot, bg_ms: bg0_ms, trans: lut_trans, ms: lut_ms };
@@ -2213,10 +2238,11 @@ impl Renderer {
             queue.submit([enc.finish()]);
         }
         Ok(Self {
+            ao_clear: false,
             ground_mats,
             casc_ub, bg_casc, bg_tileu, l_dres, l_ao, p_gtao, p_ao_blur, p_dres, p_road, p_field, p_lights, dyn_lights, p_rain, p_veil, p_bolt, bolt_buf, p_tree, p_tree_near, imp, p_tree_shadow, p_tree_shadow_fixed, p_card, near_buf, p_inst, p_inst_shadow, inst_buf, fall_buf, tree_lib: None, inst_lib: None,
             gpu_timer: crate::gputime::GpuTimer::new(&device, &queue),
-            globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res: SHADOW_RES, bg0_src, scale: 1.0, ao: true, cloud_step: 1.0, l_tile, l_build, l_composite, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
+            globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res, bg0_src, scale: gfx.scale, ao: gfx.ao, cloud_step: gfx.cloud_step(), l_tile, l_build, l_composite, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
             tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, light_cover, light_cover_view, glow_tex, gclouds_tex, build_ub, obj_ub, bg_obj, l_obj, paint_ub, tile_ibuf, tile_nidx: ix.len() as u32,
             p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_idx, tess_buf, tess_cap, cell_ibuf, p_build, p_build_whole, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, obj_src, pl_obj, obj_fast: None, obj_fast_rx: None, p_glass, p_composite, p_composite_edge, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit, p_logo,
             psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, logo_font: crate::logo::find_font(), logo_key: None, surface, config, queue, device, stats: [0.0; 4], headless: false, integrated,
@@ -2225,7 +2251,7 @@ impl Renderer {
 
     #[allow(clippy::too_many_arguments)]
     fn make_targets(
-        d: &wgpu::Device, config: &wgpu::SurfaceConfiguration, (w, h): (u32, u32), l_dres: &wgpu::BindGroupLayout, l_ao: &wgpu::BindGroupLayout, l_composite: &wgpu::BindGroupLayout, l_cloud: &wgpu::BindGroupLayout, l_cloud_apply: &wgpu::BindGroupLayout, l_cloud_temporal: &wgpu::BindGroupLayout,
+        d: &wgpu::Device, config: &wgpu::SurfaceConfiguration, (w, h): (u32, u32), cloud_divisor: u32, l_dres: &wgpu::BindGroupLayout, l_ao: &wgpu::BindGroupLayout, l_composite: &wgpu::BindGroupLayout, l_cloud: &wgpu::BindGroupLayout, l_cloud_apply: &wgpu::BindGroupLayout, l_cloud_temporal: &wgpu::BindGroupLayout,
         l_post: &wgpu::BindGroupLayout, l_pdraw: &wgpu::BindGroupLayout, l_glass: &wgpu::BindGroupLayout, psim_ub: &wgpu::Buffer, pbuf: &wgpu::Buffer, black: &wgpu::TextureView,
     ) -> Targets {
         // Everything is drawn at the render resolution (w, h); the tonemap
@@ -2243,7 +2269,7 @@ impl Renderer {
         let hdr_tex = make_tex(d, "hdr", w, h, 1, 1, HDR, rt | wgpu::TextureUsages::COPY_SRC);
         let hdr = view(&hdr_tex);
         let scene_tex = make_tex(d, "scene behind glass", w, h, 1, 1, HDR, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
-        let (cw, ch) = ((w / 2).max(1), (h / 2).max(1));
+        let (cw, ch) = (w.div_ceil(cloud_divisor), h.div_ceil(cloud_divisor));
         let cloud = view(&make_tex(d, "cloud", cw, ch, 1, 1, HDR, rt));
         let cloud_dist = view(&make_tex(d, "cloud dist", cw, ch, 1, 1, CLOUD_DIST, rt));
         let cloud_hist = [view(&make_tex(d, "cloud hist 0", cw, ch, 1, 1, HDR, rt)), view(&make_tex(d, "cloud hist 1", cw, ch, 1, 1, HDR, rt))];
@@ -2300,9 +2326,13 @@ impl Renderer {
     /// The size everything is drawn at before the tonemap: the window's
     /// scaled by the render resolution setting.
     pub fn render_size(&self) -> (u32, u32) {
-        let max = self.device.limits().max_texture_dimension_2d;
-        let s = |v: u32| ((v as f32 * self.scale).round() as u32).clamp(1, max);
-        (s(self.config.width), s(self.config.height))
+        Self::scaled_size(&self.device, &self.config, self.scale)
+    }
+
+    fn scaled_size(d: &wgpu::Device, config: &wgpu::SurfaceConfiguration, scale: f32) -> (u32, u32) {
+        let max = d.limits().max_texture_dimension_2d;
+        let s = |v: u32| ((v as f32 * scale).round() as u32).clamp(1, max);
+        (s(config.width), s(config.height))
     }
 
     /// Side of the part of its shadow map layer the aircraft's shadow uses.
@@ -2311,23 +2341,23 @@ impl Renderer {
     }
 
     fn remake_targets(&mut self) {
+        self.ao_clear = false;
         self.cloud_hist_ok = false;
         self.taa_hist_ok = false;
         self.logo_key = None;
         let (w, h) = self.render_size();
-        self.targets = Self::make_targets(&self.device, &self.config, (w, h), &self.l_dres, &self.l_ao, &self.l_composite, &self.l_cloud, &self.l_cloud_apply, &self.l_cloud_temporal, &self.l_post, &self.l_pdraw, &self.l_glass, &self.psim_ub, &self.pbuf, &self.black);
+        self.targets = Self::make_targets(&self.device, &self.config, (w, h), cloud_divisor(self.cloud_step), &self.l_dres, &self.l_ao, &self.l_composite, &self.l_cloud, &self.l_cloud_apply, &self.l_cloud_temporal, &self.l_post, &self.l_pdraw, &self.l_glass, &self.psim_ub, &self.pbuf, &self.black);
         self.fluid_t = self.fluid.draw_targets(&self.device, &self.targets.depth, w, h);
     }
 
-    /// Render resolution as a share of the window's (graphics settings).
-    pub fn set_scale(&mut self, s: f32) {
-        let s = s.clamp(crate::graphics::SCALE_MIN, crate::graphics::SCALE_MAX);
-        if s != self.scale {
-            let old = self.render_size();
-            self.scale = s;
-            if self.render_size() != old {
-                self.remake_targets();
-            }
+    /// Change the scene and cloud resolutions together when applying a preset.
+    pub fn set_scene_quality(&mut self, scale: f32, cloud_step: f32) {
+        let old_size = self.render_size();
+        let old_divisor = cloud_divisor(self.cloud_step);
+        self.scale = scale.clamp(crate::graphics::SCALE_MIN, crate::graphics::SCALE_MAX);
+        self.cloud_step = cloud_step;
+        if self.render_size() != old_size || cloud_divisor(cloud_step) != old_divisor {
+            self.remake_targets();
         }
     }
 
@@ -2622,11 +2652,14 @@ impl Renderer {
         }
         let sview = frame.as_ref().map(|f| f.texture.create_view(&Default::default()));
         let q = &self.queue;
-        self.cloud_flip ^= 1;
-        if !self.cloud_hist_ok {
-            f.g.cam_delta[3] = 0.0;
+        let render_clouds = f.g.start[0] <= 0.0;
+        if render_clouds {
+            self.cloud_flip ^= 1;
+            if !self.cloud_hist_ok {
+                f.g.cam_delta[3] = 0.0;
+            }
         }
-        self.cloud_hist_ok = true;
+        self.cloud_hist_ok = render_clouds;
         // Anti-aliasing blends into last frame's result, if there is one and
         // the camera has not jumped since.
         let taa = f.g.taa[2] > 0.5;
@@ -2650,8 +2683,14 @@ impl Renderer {
         self.ground_mats.poll(&self.device, q);
         f.g.det = self.ground_mats.params;
         f.g.quality = [self.cloud_step, self.scale, 1.0 / self.config.width.max(1) as f32, 1.0 / self.config.height.max(1) as f32];
-        let cs_full = self.cshadow.prepare(&mut f.g);
-        q.write_buffer(&self.cshadow.mix_ub, 0, &self.cshadow.mix_bytes());
+        let cs_full = if render_clouds {
+            let full = self.cshadow.prepare(&mut f.g);
+            q.write_buffer(&self.cshadow.mix_ub, 0, &self.cshadow.mix_bytes());
+            Some(full)
+        } else {
+            self.cshadow.ok = false;
+            None
+        };
         q.write_buffer(&self.globals_ub, 0, bytemuck::bytes_of(&f.g));
         q.write_buffer(&self.psim_ub, 0, bytemuck::bytes_of(&f.psim));
         let n_tiles = f.tiles.len().min(MAX_TILES as usize);
@@ -2826,7 +2865,9 @@ impl Renderer {
             }
         }
         mark(&mut enc, "compute");
-        self.cshadow.draw(&mut enc, &self.bg0_pre, cs_full);
+        if let Some(full) = cs_full {
+            self.cshadow.draw(&mut enc, &self.bg0_pre, full);
+        }
         {
             let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&self.lut_sky, true))], None));
             rp.set_pipeline(&self.p_sky);
@@ -3170,9 +3211,9 @@ impl Renderer {
             self.shore.compute(q, &mut enc, step, [f.g.ocean[0], f.g.ocean[1]]);
         }
         mark(&mut enc, "prep");
-        for c in 0..CASCADES {
-            let mut rp = enc.begin_render_pass(&pass_desc(&[], Some(depth_att(&self.shadow[c], 1.0))));
-            if f.g.csm[3] > 0.0 {
+        if f.g.csm[3] > 0.0 {
+            for c in 0..CASCADES {
+                let mut rp = enc.begin_render_pass(&pass_desc(&[], Some(depth_att(&self.shadow[c], 1.0))));
                 rp.set_bind_group(0, &self.bg0_shadow, &[]);
                 rp.set_bind_group(2, &self.bg_casc, &[c as u32 * 256]);
                 solids(&mut rp, Some(c), 3);
@@ -3231,28 +3272,24 @@ impl Renderer {
             }
         }
 
-        {
+        if f.g.pshadow[3] > 0.0 {
             // The aircraft's own fine shadow map.
             let mut rp = enc.begin_render_pass(&pass_desc(&[], Some(depth_att(&self.shadow[PLANE_LAYER], 1.0))));
-            if f.g.pshadow[3] > 0.0 {
-                let r = self.plane_shadow_res() as f32;
-                rp.set_viewport(0.0, 0.0, r, r, 0.0, 1.0);
-                rp.set_bind_group(0, &self.bg0_pre, &[]);
-                rp.set_bind_group(2, &self.bg_casc, &[PLANE_LAYER as u32 * 256]);
-                for (i, o) in f.objs.iter().take(n_objs).enumerate() {
-                    if o.glass || o.cast & (1 << PLANE_LAYER) == 0 {
-                        continue;
-                    }
-                    rp.set_pipeline(if o.cut { &self.p_obj_shadow } else { &self.p_obj_shadow_solid });
-                    let m = &self.meshes[o.mesh];
-                    if m.n_idx == 0 {
+            rp.set_bind_group(0, &self.bg0_pre, &[]);
+            rp.set_bind_group(2, &self.bg_casc, &[PLANE_LAYER as u32 * 256]);
+            for (i, o) in f.objs.iter().take(n_objs).enumerate() {
+                if o.glass || o.cast & (1 << PLANE_LAYER) == 0 {
+                    continue;
+                }
+                rp.set_pipeline(if o.cut { &self.p_obj_shadow } else { &self.p_obj_shadow_solid });
+                let m = &self.meshes[o.mesh];
+                if m.n_idx == 0 {
                     continue;
                 }
                 rp.set_bind_group(1, m.bind.as_deref().unwrap_or(&self.bg_obj), &[i as u32 * 256]);
-                    rp.set_vertex_buffer(0, m.vbuf.slice(..));
-                    rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    rp.draw_indexed(0..m.n_idx, 0, 0..1);
-                }
+                rp.set_vertex_buffer(0, m.vbuf.slice(..));
+                rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..m.n_idx, 0, 0..1);
             }
         }
         mark(&mut enc, "shadows");
@@ -3350,13 +3387,15 @@ impl Renderer {
             rp.set_bind_group(1, bg1, &[]);
             rp.draw(0..3, 0..1);
         };
-        if self.ao {
+        if self.ao && !(f.g.start[0] > 0.0 && f.g.up[3] >= 800_000.0) {
             full(&mut enc, &t.ao_raw, true, &self.p_gtao, &t.bg_gtao);
             full(&mut enc, &t.ao, true, &self.p_ao_blur, &t.bg_ao_blur);
-        } else {
-            // No occlusion anywhere.
+            self.ao_clear = false;
+        } else if !self.ao_clear {
+            // Keep the neutral occlusion texture until AO is used again.
             let white = wgpu::RenderPassColorAttachment { view: &t.ao, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::WHITE), store: wgpu::StoreOp::Store } };
             drop(enc.begin_render_pass(&pass_desc(&[Some(white)], None)));
+            self.ao_clear = true;
         }
         mark(&mut enc, "resolve+ao");
         full(&mut enc, &t.hdr, true, &self.p_composite, &t.bg_composite);
@@ -3381,21 +3420,23 @@ impl Renderer {
                 rp.draw(0..6, 0..n_dyn as u32);
             }
         }
-        {
-            let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&t.cloud, true)), Some(color_att(&t.cloud_dist, true))], None));
-            rp.set_pipeline(&self.p_cloud);
-            rp.set_bind_group(0, &self.bg0, &[]);
-            rp.set_bind_group(1, &t.bg_cloud, &[]);
-            rp.draw(0..3, 0..1);
-        }
         let cf = self.cloud_flip;
-        full(&mut enc, &t.cloud_hist[cf], true, &self.p_cloud_temporal, &t.bg_cloud_temporal[cf]);
-        {
-            let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&t.hdr, false))], None));
-            rp.set_bind_group(0, &self.bg0, &[]);
-            rp.set_pipeline(&self.p_cloud_apply);
-            rp.set_bind_group(1, &t.bg_cloud_apply[cf], &[]);
-            rp.draw(0..3, 0..1);
+        if render_clouds {
+            {
+                let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&t.cloud, true)), Some(color_att(&t.cloud_dist, true))], None));
+                rp.set_pipeline(&self.p_cloud);
+                rp.set_bind_group(0, &self.bg0, &[]);
+                rp.set_bind_group(1, &t.bg_cloud, &[]);
+                rp.draw(0..3, 0..1);
+            }
+            full(&mut enc, &t.cloud_hist[cf], true, &self.p_cloud_temporal, &t.bg_cloud_temporal[cf]);
+            {
+                let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&t.hdr, false))], None));
+                rp.set_bind_group(0, &self.bg0, &[]);
+                rp.set_pipeline(&self.p_cloud_apply);
+                rp.set_bind_group(1, &t.bg_cloud_apply[cf], &[]);
+                rp.draw(0..3, 0..1);
+            }
         }
         if parts {
             let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&t.hdr, false))], None));

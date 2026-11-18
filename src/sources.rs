@@ -192,7 +192,7 @@ pub struct Sources {
     /// airfields that have been put together (see airports.rs)
     pub fields: Mutex<HashMap<u32, Arc<crate::airports::Geo>>>,
     vec: Mutex<Lru<VecTile>>,
-    vec_url: Mutex<Option<String>>,
+    vec_url: Mutex<(Option<String>, Option<std::time::Instant>)>,
     pub imagery_url: String,
     /// optional Google satellite imagery, used in place of `imagery_url` when on
     pub google: Arc<crate::gmaps::Google>,
@@ -204,7 +204,7 @@ impl Sources {
     }
 
     pub fn with_google(fetch: Fetcher, imagery_url: String, google: Arc<crate::gmaps::Google>) -> Self {
-        Self { fetch, elev: Mutex::new(Lru::new(96)), raw: Mutex::new(Lru::new(160)), fields: Mutex::new(HashMap::new()), vec: Mutex::new(Lru::new(96)), vec_url: Mutex::new(None), imagery_url, google }
+        Self { fetch, elev: Mutex::new(Lru::new(96)), raw: Mutex::new(Lru::new(160)), fields: Mutex::new(HashMap::new()), vec: Mutex::new(Lru::new(96)), vec_url: Mutex::new((None, None)), imagery_url, google }
     }
 
     /// Satellite image for a tile: Google's when that is on (and has the
@@ -219,6 +219,25 @@ impl Sources {
         let url = self.imagery_url.replace("{z}", &id.z.to_string()).replace("{x}", &id.x.to_string()).replace("{y}", &id.y.to_string());
         let data = self.fetch.get_cached(&format!("img/{}/{}/{}.jpg", id.z, id.x, id.y), &url)?;
         Ok(image::load_from_memory(&data)?.to_rgba8())
+    }
+
+    /// A coarser cached tile can provide the base colour if the exact
+    /// imagery is unavailable. Keep the search local to this part of the map.
+    fn cached_parent_imagery(&self, id: TileId) -> Option<image::RgbaImage> {
+        for z in (id.z.saturating_sub(4)..id.z).rev() {
+            let (parent, u, v, scale) = id.ancestor(z);
+            let path = self.fetch.root.join(format!("img/{}/{}/{}.jpg", parent.z, parent.x, parent.y));
+            let Ok(img) = image::open(path) else { continue };
+            let w = img.width();
+            if w != img.height() || !w.is_power_of_two() {
+                continue;
+            }
+            let size = (scale * w as f64) as u32;
+            if size > 0 {
+                return Some(img.crop_imm((u * w as f64) as u32, (v * w as f64) as u32, size, size).into_rgba8());
+            }
+        }
+        None
     }
 
     /// Elevation as the data has it.
@@ -237,8 +256,17 @@ impl Sources {
     }
 
     fn vec_template(&self) -> Result<String> {
-        if let Some(u) = self.vec_url.lock().clone() {
-            return Ok(u);
+        if self.fetch.offline {
+            return Err(anyhow!("offline"));
+        }
+        // Share a single TileJSON request across workers and cool down after
+        // an outage so a missing endpoint doesn't stall each scenery tile.
+        let mut endpoint = self.vec_url.lock();
+        if let Some(u) = &endpoint.0 {
+            return Ok(u.clone());
+        }
+        if endpoint.1.is_some_and(|retry| std::time::Instant::now() < retry) {
+            return Err(anyhow!("vector tile endpoint unavailable"));
         }
         // OpenFreeMap publishes the current planet build in a TileJSON document.
         let u = self
@@ -246,10 +274,17 @@ impl Sources {
             .get("https://tiles.openfreemap.org/planet")
             .ok()
             .and_then(|d| serde_json::from_slice::<serde_json::Value>(&d).ok())
-            .and_then(|j| j["tiles"][0].as_str().map(String::from))
-            .ok_or_else(|| anyhow!("no vector tile endpoint"))?;
-        *self.vec_url.lock() = Some(u.clone());
-        Ok(u)
+            .and_then(|j| j["tiles"][0].as_str().map(String::from));
+        match u {
+            Some(url) => {
+                *endpoint = (Some(url.clone()), None);
+                Ok(url)
+            }
+            None => {
+                endpoint.1 = Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+                Err(anyhow!("no vector tile endpoint"))
+            }
+        }
     }
 
     /// Shared raw vector cache; the minimap only decodes its small set of layers.
@@ -751,21 +786,29 @@ pub struct TileData {
     pub imagery_gen: u32,
 }
 
-pub fn mip_chain(mut data: Vec<u8>, mut size: usize, ch: usize) -> Vec<Vec<u8>> {
+pub fn mip_chain(data: Vec<u8>, size: usize, ch: usize) -> Vec<Vec<u8>> {
+    mip_chain_rect(data, size, size, ch)
+}
+
+pub fn mip_chain_rect(mut data: Vec<u8>, mut width: usize, mut height: usize, ch: usize) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
-    while size > 1 {
-        let half = size / 2;
-        let mut next = vec![0u8; half * half * ch];
-        for y in 0..half {
-            for x in 0..half {
+    while width > 1 || height > 1 {
+        let (w, h) = ((width / 2).max(1), (height / 2).max(1));
+        let mut next = vec![0u8; w * h * ch];
+        for y in 0..h {
+            let top = y * 2 * width;
+            let bottom = (y * 2 + 1).min(height - 1) * width;
+            for x in 0..w {
+                let left = x * 2;
+                let right = (left + 1).min(width - 1);
                 for c in 0..ch {
-                    let s = |dx: usize, dy: usize| data[((y * 2 + dy) * size + x * 2 + dx) * ch + c] as u32;
-                    next[(y * half + x) * ch + c] = ((s(0, 0) + s(1, 0) + s(0, 1) + s(1, 1) + 2) / 4) as u8;
+                    let s = |i: usize| data[i * ch + c] as u32;
+                    next[(y * w + x) * ch + c] = ((s(top + left) + s(top + right) + s(bottom + left) + s(bottom + right) + 2) / 4) as u8;
                 }
             }
         }
         out.push(std::mem::replace(&mut data, next));
-        size = half;
+        (width, height) = (w, h);
     }
     out.push(data);
     out
@@ -902,6 +945,26 @@ impl NightLights {
             }
             last.1.as_ref().map_or(0.0, |p| lin[p[(y as usize % self.b) * self.b + x as usize % self.b] as usize])
         }
+    }
+
+    /// Day colour and night-light intensity share the globe's RGBA texture.
+    pub fn globe_rgba(&self, earth: &image::RgbImage) -> Vec<u8> {
+        let lv = self.levels.len() - 1;
+        let (cols, rows, _, _) = self.levels[lv];
+        let (w, h) = earth.dimensions();
+        let (nw, nh) = (cols as u64 * self.b as u64, rows as u64 * self.b as u64);
+        let mut texel = self.texels(lv);
+        let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
+        for y in 0..h {
+            let ly = (y as u64 * nh / h as u64) as i64;
+            for x in 0..w {
+                let lx = (x as u64 * nw / w as u64) as i64;
+                let light = (texel(lx, ly) * 510.0).round() as u8;
+                let [r, g, b] = earth.get_pixel(x, y).0;
+                rgba.extend_from_slice(&[r, g, b, light]);
+            }
+        }
+        rgba
     }
 
     /// Mean light (units of `tile_mask`, before its byte scaling) over each of
@@ -1093,14 +1156,44 @@ fn ground_mask(vt: &VecTile, ox: f64, oy: f64, scale: f64, tile_m: f64) -> Vec<u
     out
 }
 
+/// July 2004 Blue Marble with topography, credited to NASA Earth Observatory.
+pub fn globe_image() -> &'static image::RgbImage {
+    static IMAGE: std::sync::OnceLock<image::RgbImage> = std::sync::OnceLock::new();
+    IMAGE.get_or_init(|| image::load_from_memory(include_bytes!("../assets/ui/blue-marble.jpg")).expect("bundled Blue Marble JPEG").into_rgb8())
+}
+
+fn globe_pixel(id: TileId, u: f64, v: f64) -> [u8; 3] {
+    let img = globe_image();
+    let (lat, _) = id.lat_lon(u, v);
+    let x = (id.x as f64 + u) / (1u32 << id.z) as f64;
+    let y = 0.5 - lat / std::f64::consts::PI;
+    img.get_pixel((x.rem_euclid(1.0) * img.width() as f64) as u32, (y.clamp(0.0, 0.999_999) * img.height() as f64) as u32).0
+}
+
+fn fallback_imagery(id: TileId, mask: &[u8]) -> image::RgbaImage {
+    // The bundled map carries continent-scale colour. Use mapped land cover
+    // for local detail where it is available and keep these tiles small.
+    let size = if id.z <= 6 { 128 } else if id.z < 12 { 32 } else { 16 };
+    image::RgbaImage::from_fn(size, size, |x, y| {
+        let (u, v) = ((x as f64 + 0.5) / size as f64, (y as f64 + 0.5) / size as f64);
+        let i = ((v * MASK as f64) as usize * MASK + (u * MASK as f64) as usize) * 4;
+        let [r, g, b] = match (mask[i] > 127, mask[i + 2] & 15) {
+            (true, _) => [26, 50, 72],
+            (_, LC_WOOD) => [45, 64, 37],
+            (_, LC_SCRUB | LC_GRASS | GC_PITCH) => [95, 110, 66],
+            (_, LC_FARM) => [125, 119, 79],
+            (_, LC_WET) => [61, 79, 64],
+            (_, LC_ROCK | GC_PAVED) => [116, 112, 106],
+            _ => globe_pixel(id, u, v),
+        };
+        image::Rgba([r, g, b, 255])
+    })
+}
+
 pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
     // read before the image, so a switch while this tile loads still refreshes it
     let imagery_gen = src.google.generation();
-    let img = src.imagery(id)?;
-    let img_size = img.width();
-    if img_size != img.height() || !img_size.is_power_of_two() {
-        return Err(anyhow!("unexpected imagery size"));
-    }
+    let img = src.imagery(id).ok().filter(|img| img.width() == img.height() && img.width().is_power_of_two());
     let (did, ox, oy, sc) = id.ancestor(DATA_ZOOM);
     let elev = src.elev(did).ok();
     // Coarser tiles near an airfield take their heights from the finer,
@@ -1127,11 +1220,16 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
         // No vector data: fall back to "below sea level is ocean".
         Err(_) => {
             let mut m = vec![0u8; MASK * MASK * 4];
-            if let Some(e) = &elev {
+            if elev.is_some() || img.is_none() {
                 for y in 0..MASK {
                     for x in 0..MASK {
                         let (u, v) = ((x as f64 + 0.5) / MASK as f64, (y as f64 + 0.5) / MASK as f64);
-                        if e.sample(ox + u * sc, oy + v * sc) < -1.0 {
+                        let sea = elev.as_ref().map_or_else(|| {
+                            // Blue Marble marks open water with a near-constant navy.
+                            let [r, g, b] = globe_pixel(id, u, v);
+                            r < 9 && g < 12 && (15..=25).contains(&b)
+                        }, |e| e.sample(ox + u * sc, oy + v * sc) < -1.0);
+                        if sea {
                             m[(y * MASK + x) * 4] = 255;
                             m[(y * MASK + x) * 4 + 1] = 80;
                         }
@@ -1141,6 +1239,8 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
             m
         }
     };
+    let img = img.or_else(|| src.cached_parent_imagery(id)).unwrap_or_else(|| fallback_imagery(id, &mask));
+    let img_size = img.width();
     let lights = NightLights::get().tile_mask(id, &mask);
 
     let (clat, clon) = id.lat_lon(0.5, 0.5);
@@ -1341,5 +1441,22 @@ mod night_lights_tests {
             let mean = m.iter().map(|v| *v as f64).sum::<f64>() / m.len() as f64;
             eprintln!("z{z}: {:.1} ms, mean {mean:.1}, max {}", t.elapsed().as_secs_f64() * 1e3, m.iter().max().unwrap());
         }
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    #[test]
+    fn cold_offline_tiles_cover_land_and_ocean() {
+        let cache = std::env::temp_dir().join(format!("fableflight-offline-{}", std::process::id()));
+        let src = Sources::new(Fetcher::new(cache, true), String::new());
+        let land = build_tile(&src, TileId::at(0.4, 0.4, 10)).unwrap();
+        let sea = build_tile(&src, TileId::at(0.0, -2.45, 10)).unwrap();
+        assert!(land.water.iter().all(|&water| !water));
+        assert!(sea.water.iter().all(|&water| water));
+        assert_eq!(land.imagery[0].len(), (land.img_size * land.img_size * 4) as usize);
+        assert_ne!(land.imagery[0], sea.imagery[0]);
     }
 }

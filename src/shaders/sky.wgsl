@@ -89,15 +89,21 @@ fn sky_color(rd: vec3f, jit: f32) -> vec3f {
   let sun = G.sun_dir.xyz;
   // Fresh jitter every frame: cloud shadows cross the march (light shafts), and the
   // temporal AA smooths what the steps miss.
-  let sc = sky_march(rd, 24, fract(jit + G.time.w * 0.618034));
+  let steps = select(24, 14, G.quality.x > 1.5);
+  let sc = sky_march(rd, steps, fract(jit + G.time.w * 0.618034));
   var col = sc.L;
   let gnd = ray_sphere(oc, rd, G.planet.w);
   if (gnd.x > 0.0) {
-    // Bare planet where no tile is drawn yet: a plain lit ocean.
     let p = oc + rd * gnd.x;
-    let mu = dot(normalize(p), sun);
-    let mum = dot(normalize(p), G.moon.xyz);
-    col += sc.T * vec3f(0.012, 0.035, 0.07) * ((sun_trans(0.0, mu) * max(mu, 0.0) + 0.02) * G.sun_dir.w + moon_light(normalize(p), 0.0) * max(mum, 0.0)) / PI;
+    let n = normalize(p);
+    let mu = dot(n, sun);
+    let mum = dot(n, G.moon.xyz);
+    var surface = vec3f(0.012, 0.035, 0.07);
+    if (G.start.x < 0.0) {
+      let texel = globe_texel(n, gnd.x).rgb;
+      if (!globe_water(texel)) { surface = texel; }
+    }
+    col += sc.T * surface * ((sun_trans(0.0, mu) * max(mu, 0.0) + 0.02) * G.sun_dir.w + moon_light(n, 0.0) * max(mum, 0.0)) / PI;
   } else {
     let cs = dot(rd, sun);
     col += sc.T * smoothstep(0.999978, 0.999990, cs) * G.sun_dir.w * 600.0;
@@ -138,6 +144,16 @@ fn globe_uv(n: vec3f) -> vec2f {
   let lon = atan2(n.y, n.x);
   let lat = asin(clamp(n.z, -1.0, 1.0));
   return vec2f(lon / (2.0 * PI) + 0.5, clamp(0.5 - lat / PI, 0.0005, 0.9995));
+}
+
+fn globe_texel(n: vec3f, dist: f32) -> vec4f {
+  let footprint = dist * G.misc.w / G.planet.w;
+  let lod = log2(max(1.0, footprint * f32(textureDimensions(t_globe).x) / (2.0 * PI)));
+  return textureSampleLevel(t_globe, s_repeat, globe_uv(n), lod);
+}
+
+fn globe_water(texel: vec3f) -> bool {
+  return texel.b > 0.004 && texel.b < 0.012 && texel.r < 0.003 && texel.g < 0.004;
 }
 // Cloud cover 0..1 (globeclouds.rs `cover`).
 fn globe_cloud(n: vec3f) -> f32 {
@@ -266,8 +282,15 @@ fn globe_sky(rd: vec3f, jit: f32) -> vec3f {
   let oc = -G.planet.xyz;
   let gnd = ray_sphere(oc, rd, G.planet.w);
   if (gnd.x > 0.0) {
-    // Where no tile is drawn yet, the bare sphere as sea.
-    return globe_surface(rd * gnd.x, rd, vec3f(0.010, 0.025, 0.055), true, jit);
+    let p = rd * gnd.x;
+    let n = normalize(oc + p);
+    let mu = dot(n, G.sun_dir.xyz);
+    let texel = globe_texel(n, gnd.x);
+    let water = globe_water(texel.rgb);
+    let light = globe_amb(mu) + globe_sun(mu, 0.0) * (max(mu, 0.0) / PI);
+    let cities = vec3f(1.0, 0.68, 0.40) * (texel.a * night_at(n) * G.sun_dir.w * 0.25);
+    let albedo = select(texel.rgb * light + cities, vec3f(0.010, 0.025, 0.055), water);
+    return globe_surface(p, rd, albedo, water, jit);
   }
   var col = space(rd) + moon_disc(rd);
   let top = ray_sphere(oc, rd, G.planet.w + ATM_H);

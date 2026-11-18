@@ -405,16 +405,19 @@ fn depth_match(a: f32, b: f32) -> f32 {
 
 @fragment fn fs(in: FsIn) -> CloudOut {
   var o = CloudOut(vec4f(0.0, 0.0, 0.0, 1.0), vec2f(0.0));
-  let ray = view_ray(in.uv);
+  let div = cloud_pixel_divisor();
+  let ray = view_ray(min(in.pos.xy * f32(div) * G.screen.zw, vec2f(1.0)));
   let rd = normalize(ray);
-  // Each texel covers 2x2 scene pixels. Alternate texels march to the nearest and the
-  // farthest of them (reverse Z: larger = nearer), so at a silhouette both surfaces
+  // Alternate texels march to the nearest and farthest sampled scene depth
+  // (reverse Z: larger = nearer), so at a silhouette both surfaces
   // are represented in every 2x2 texel neighbourhood and the upsample can pick the
   // matching one instead of smearing cloud over the plane or clear sky around it.
   let hp = vec2i(in.pos.xy);
-  let q = hp * 2;
-  let z4 = vec4f(textureLoad(t_depth, q, 0), textureLoad(t_depth, q + vec2i(1, 0), 0),
-                 textureLoad(t_depth, q + vec2i(0, 1), 0), textureLoad(t_depth, q + vec2i(1, 1), 0));
+  let q = hp * div;
+  let edge = vec2i(textureDimensions(t_depth)) - 1;
+  let far = min(q + vec2i(div - 1), edge);
+  let z4 = vec4f(textureLoad(t_depth, q, 0), textureLoad(t_depth, vec2i(far.x, q.y), 0),
+                 textureLoad(t_depth, vec2i(q.x, far.y), 0), textureLoad(t_depth, far, 0));
   var z = min(min(z4.x, z4.y), min(z4.z, z4.w));
   if (((hp.x + hp.y) & 1) == 0) { z = max(max(z4.x, z4.y), max(z4.z, z4.w)); }
   var tscene = 1e9;
@@ -992,7 +995,7 @@ fn depth_match(a: f32, b: f32) -> f32 {
   // Reproject through the distance of the cloud this pixel sees.
   var dist = cd.x * 1000.0;
   if (dist <= 0.0) { dist = 60000.0; }
-  let P = normalize(view_ray(in.uv)) * dist;
+  let P = normalize(view_ray(min(in.pos.xy * f32(cloud_pixel_divisor()) * G.screen.zw, vec2f(1.0)))) * dist;
   let pc = G.prev_vp * vec4f(P + G.cam_delta.xyz, 1.0);
   if (pc.w <= 0.0) { return cur; }
   let puv = pc.xy / pc.w * vec2f(0.5, -0.5) + 0.5;
@@ -1009,7 +1012,7 @@ fn depth_match(a: f32, b: f32) -> f32 {
 @group(1) @binding(5) var t_color: texture_2d<f32>;
 fn cloud_at(pos: vec2f, d: f32) -> vec4f {
   let dims = vec2i(textureDimensions(t_cloud));
-  let f = pos * 0.5 - 0.5;
+  let f = pos / f32(cloud_pixel_divisor()) - 0.5;
   let b = vec2i(floor(f));
   let fr = f - floor(f);
   var acc = vec4f(0.0);

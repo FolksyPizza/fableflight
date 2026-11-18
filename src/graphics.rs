@@ -84,6 +84,14 @@ pub const SCALE_MIN: f32 = 0.5;
 pub const SCALE_MAX: f32 = 2.0;
 
 impl Graphics {
+    pub fn platform_default() -> Self {
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            Self::preset(Level::Low)
+        } else {
+            Self::default()
+        }
+    }
+
     /// One of the presets (taa and vsync on).
     pub fn preset(l: Level) -> Self {
         let mut g = Graphics { scale: 1.0, shadows: Level::High, clouds: Level::High, terrain: Level::High, scenery: Level::High, city: Level::High, trees: Level::High, cars: Level::High, ao: true, taa: true, vsync: true, fps_cap: 0 };
@@ -121,7 +129,10 @@ impl Graphics {
 
     /// msaa samples, 2 on low, applied on next start.
     pub fn samples(&self) -> u32 {
-        if self.matches() == Some(Level::Low) { 2 } else { 4 }
+        let mut low = *self;
+        low.apply(Level::Low);
+        low.scale = self.scale;
+        if low == *self { 2 } else { 4 }
     }
 
     /// Side of the sun's shadow map (texels; Off keeps a small unused one).
@@ -179,19 +190,14 @@ impl Graphics {
         }
     }
 
-    /// Whether the settings have ever been saved (else the defaults may
-    /// adapt to the machine, e.g. a lower resolution on an integrated GPU).
-    pub fn saved() -> bool {
-        Self::path().is_some_and(|p| p.exists())
-    }
-
     fn path() -> Option<PathBuf> {
         dirs::config_dir().map(|d| d.join("fablegame").join("graphics.json"))
     }
 
-    /// The saved settings, or High.
-    pub fn load() -> Self {
-        let j: serde_json::Value = Self::path().and_then(|p| std::fs::read(p).ok()).and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default();
+    /// The saved settings, if the file can be read.
+    pub fn load() -> Option<Self> {
+        let j: serde_json::Value = serde_json::from_slice(&std::fs::read(Self::path()?).ok()?).ok()?;
+        j.as_object()?;
         let mut g = Self::default();
         g.fps_cap = j["fps_cap"].as_u64().map(|v| v as u16).filter(|v| [0, 30, 60, 90, 120, 144, 165, 240].contains(v)).unwrap_or(0);
         // a saved preset follows the code, so retuned presets reach old saves.
@@ -199,7 +205,7 @@ impl Graphics {
             g.apply(l);
             g.taa = j["taa"].as_bool().unwrap_or(g.taa);
             g.vsync = j["vsync"].as_bool().unwrap_or(g.vsync);
-            return g;
+            return Some(g);
         }
         let lvl = |k: &str, d: Level| j[k].as_str().and_then(Level::parse).filter(|l| *l != Level::Off).unwrap_or(d);
         if let Some(s) = j["scale"].as_f64() {
@@ -215,7 +221,7 @@ impl Graphics {
         g.ao = j["ao"].as_bool().unwrap_or(g.ao);
         g.taa = j["taa"].as_bool().unwrap_or(g.taa);
         g.vsync = j["vsync"].as_bool().unwrap_or(g.vsync);
-        g
+        Some(g)
     }
 
     pub fn save(&self) {
@@ -265,7 +271,7 @@ impl Graphics {
             });
         });
         note(ui, match self.matches() {
-            Some(Level::Low) => "Low: 60% resolution, no shadows, quicker clouds, nearer scenery, simpler cities and trees, light traffic, no ambient occlusion.",
+            Some(Level::Low) => "Low: 60% resolution, lighter clouds and terrain, nearer scenery, no shadows or ambient occlusion.",
             Some(Level::Medium) => "Medium: 75% resolution, a coarse shadow map, no ambient occlusion and a lighter version of everything else.",
             Some(Level::High) => "High: the full look at the window's own resolution (what the game has always drawn).",
             Some(Level::Ultra) => "Ultra: past High. Supersampled at 150%, a 6K shadow map, finer clouds, terrain and scenery further out. Wants a strong GPU.",
@@ -367,6 +373,9 @@ mod tests {
         assert_eq!(g.matches(), Some(Level::High), "taa and vsync are not part of a preset");
         g.scale = 1.2;
         assert_eq!(g.matches(), None);
+        let mut low = Graphics::preset(Level::Low);
+        low.scale = SCALE_MIN;
+        assert_eq!(low.samples(), 2);
     }
 
     #[test]

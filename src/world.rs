@@ -78,6 +78,7 @@ enum FSlot {
 enum BSlot {
     Loading,
     Ready(Box<BTile>),
+    RetryAfter(std::time::Instant),
 }
 /// A building tile whose geometry is still being copied to the GPU.
 struct Upload {
@@ -233,6 +234,7 @@ pub struct World {
     in_flight: usize,
     pub max_zoom: u8,
     pub lod_k: f64,
+    pub tessellate: bool,
     /// multiplies how far out building (and tree) tiles are loaded (graphics settings)
     pub reach_k: f64,
     /// graphics settings: multiplies the distances buildings change level of
@@ -284,12 +286,12 @@ impl Frustum {
 impl World {
     pub fn new(loader: Loader, max_zoom: u8) -> Self {
         let photo = Some(Box::new(crate::tiles3d::Photo::new(loader.src.google.clone(), Some(loader.src.clone()))));
-        Self { photo, flat: None, loader, tiles: HashMap::default(), builds: HashMap::default(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, reach_k: 1.0, city_k: 1.0, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::default(), ocean: crate::ocean::Ocean::new() }
+        Self { photo, flat: None, loader, tiles: HashMap::default(), builds: HashMap::default(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, tessellate: true, reach_k: 1.0, city_k: 1.0, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::default(), ocean: crate::ocean::Ocean::new() }
     }
 
-    /// Tiles wanted but not yet asked for (at most 28 are on their way at once).
-    pub fn queued(&self) -> usize {
-        self.wanted.len()
+    /// Readiness at the current quality settings, including staged GPU uploads.
+    pub fn departure_ready(&self, lat: f64, lon: f64) -> bool {
+        self.wanted.is_empty() && self.in_flight == 0 && self.uploads.is_empty() && self.terrain_ground(lat, lon).is_some()
     }
 
     /// Height of the ground (or water surface) at a lat/lon: the top of the
@@ -888,7 +890,7 @@ impl World {
         }
     }
 
-    pub fn update(&mut self, r: &Renderer, cam: DVec3, fr: &Frustum) {
+    pub fn update(&mut self, r: &Renderer, cam: DVec3, fr: &Frustum, departure_views: &[(DVec3, Frustum)], airport: Option<u32>) {
         self.frame += 1;
         let now = std::time::Instant::now();
         let real_dt = self.last_update.map(|t| (now - t).as_secs_f32().min(0.25)).unwrap_or(0.0);
@@ -930,8 +932,9 @@ impl World {
                             let gpu = r.upload_buildings(&bd);
                             self.uploads.push_back(Upload { id, data: Box::new(bd), gpu, part: 0, off: 0 });
                         }
-                        Err(_) => {
-                            self.builds.remove(&id);
+                        Err(e) => {
+                            log::debug!("scenery {id:?}: {e}");
+                            self.builds.insert(id, BSlot::RetryAfter(now + std::time::Duration::from_secs(30)));
                         }
                     }
                 }
@@ -959,14 +962,13 @@ impl World {
 
         let (clat, clon, calt) = geo::pos_to_lla(cam);
         let gh = self.ground(clat, clon).map(|g| g.h).unwrap_or(0.0);
-        self.draw.clear();
-        self.draw_shore.clear();
         self.wanted.clear();
-        for y in 0..4 {
-            for x in 0..4 {
-                self.select(TileId::new(2, x, y), cam, (clat, clon, calt.max(1.0), gh), fr);
-            }
+        for (eye, view) in departure_views {
+            let (lat, lon, alt) = geo::pos_to_lla(*eye);
+            let ground = self.terrain_ground(lat, lon).map_or(0.0, |g| g.h);
+            self.select_terrain(*eye, (lat, lon, alt.max(1.0), ground), view, true);
         }
+        self.select_terrain(cam, (clat, clon, calt.max(1.0), gh), fr, true);
 
         // Buildings near the ground.
         self.draw_b.clear();
@@ -1007,7 +1009,7 @@ impl World {
                                 self.in_view.push(fr.sphere(b.center - cam, b.radius));
                             }
                         }
-                        Some(BSlot::Loading) => {}
+                        Some(BSlot::Loading | BSlot::RetryAfter(_)) => {}
                         None => self.wanted.push((0.8 + (d / w) as f32 * 0.6, id.with_tag())),
                     }
                 }
@@ -1015,7 +1017,10 @@ impl World {
         }
 
         // Airfields within reach: the bigger ones from further off.
-        if self.frame % 15 == 1 && clat.abs() < 1.45 {
+        if let Some(i) = airport {
+            self.request_airfield(i, 0.0);
+        }
+        if (!departure_views.is_empty() || self.frame % 15 == 1) && clat.abs() < 1.45 {
             let db = crate::airports::Db::get();
             let mut n = 0;
             for (i, d) in db.near(clat.to_degrees(), clon.to_degrees(), 35_000.0) {
@@ -1025,21 +1030,16 @@ impl World {
                     continue;
                 }
                 n += 1;
-                match self.fields.get_mut(&i) {
-                    Some(FSlot::Ready(f)) => f.last_used = self.frame,
-                    Some(_) => {}
-                    None if self.in_flight < 28 => {
-                        self.fields.insert(i, FSlot::Loading);
-                        self.in_flight += 1;
-                        self.loader.submit(1.0 + (d / 9000.0) as f32, Job::Airfield(i));
-                    }
-                    None => {}
-                }
+                self.request_airfield(i, 1.0 + (d / 9000.0) as f32);
             }
         }
 
         // Dispatch the most urgent requests.
         self.wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
+        if !departure_views.is_empty() {
+            let mut seen = std::collections::HashSet::new();
+            self.wanted.retain(|&(_, id)| seen.insert(id));
+        }
         // (What is not asked for this time stays in `wanted` until the next
         // update clears it: `queued` counts it.)
         let mut sent = 0;
@@ -1079,7 +1079,11 @@ impl World {
                 self.tiles.retain(|id, s| id.z <= 3 || !matches!(s, Slot::Ready(t) if f - t.last_used > 600));
             }
             self.tiles.retain(|_, s| !matches!(s, Slot::Failed) || f % 3600 != 0);
-            self.builds.retain(|_, s| !matches!(s, BSlot::Ready(b) if f - b.last_used > 900));
+            self.builds.retain(|_, s| match s {
+                BSlot::Ready(b) => f - b.last_used <= 900,
+                BSlot::RetryAfter(t) => now < *t,
+                BSlot::Loading => true,
+            });
             self.fields.retain(|_, s| match s {
                 FSlot::Ready(fl) => f - fl.last_used < 1200,
                 FSlot::Failed => f % 3600 != 0,
@@ -1087,6 +1091,45 @@ impl World {
             });
         }
         self.stats = (self.draw.len(), self.in_flight, self.draw_b.len());
+    }
+
+    fn request_airfield(&mut self, id: u32, priority: f32) {
+        match self.fields.get_mut(&id) {
+            Some(FSlot::Ready(field)) => field.last_used = self.frame,
+            None if self.in_flight < 28 => {
+                self.fields.insert(id, FSlot::Loading);
+                self.in_flight += 1;
+                self.loader.submit(priority, Job::Airfield(id));
+            }
+            _ => {}
+        }
+    }
+
+    pub fn clear_draws(&mut self) {
+        self.draw.clear();
+        self.draw_shore.clear();
+        self.draw_b.clear();
+        self.in_view.clear();
+    }
+
+    /// Draw the cloud-height view using ready terrain while the streaming
+    /// budget stays focused on the player's departure view.
+    pub fn show_terrain_from(&mut self, cam: DVec3, fr: &Frustum) {
+        let (lat, lon, alt) = geo::pos_to_lla(cam);
+        let ground = self.terrain_ground(lat, lon).map_or(0.0, |g| g.h);
+        self.select_terrain(cam, (lat, lon, alt.max(1.0), ground), fr, false);
+        self.draw_b.clear();
+        self.in_view.clear();
+    }
+
+    fn select_terrain(&mut self, cam: DVec3, local: (f64, f64, f64, f64), fr: &Frustum, stream: bool) {
+        self.draw.clear();
+        self.draw_shore.clear();
+        for y in 0..4 {
+            for x in 0..4 {
+                self.select(TileId::new(2, x, y), cam, local, fr, stream);
+            }
+        }
     }
 
     /// Copy queued building geometry to the GPU until `bytes` (already used
@@ -1263,7 +1306,7 @@ impl World {
     }
 
     /// Returns true if this tile (or its descendants) covers its area.
-    fn select(&mut self, id: TileId, cam: DVec3, c: (f64, f64, f64, f64), fr: &Frustum) -> bool {
+    fn select(&mut self, id: TileId, cam: DVec3, c: (f64, f64, f64, f64), fr: &Frustum, stream: bool) -> bool {
         let (near, hidden) = Self::tile_near(id, cam, c);
         let dist = (near - cam).length().max(1.0);
         if hidden {
@@ -1273,14 +1316,16 @@ impl World {
             Some(Slot::Ready(t)) => {
                 t.last_used = self.frame;
                 // made with the imagery source switched away from: again, after what is missing
-                if !t.refreshing && t.generation != self.loader.src.google.generation() {
+                if stream && !t.refreshing && t.generation != self.loader.src.google.generation() {
                     self.wanted.push((2.0 + (dist / id.width_m()) as f32, id.with_refresh()));
                 }
                 (t.center, t.radius)
             }
             Some(_) => return false,
             None => {
-                self.wanted.push(((dist / id.width_m()) as f32, id));
+                if stream {
+                    self.wanted.push(((dist / id.width_m()) as f32, id));
+                }
                 return false;
             }
         };
@@ -1301,13 +1346,15 @@ impl World {
                     Some(Slot::Failed) => all = false,
                     None => {
                         all = false;
-                        self.wanted.push(((dist / width) as f32 + 0.01, k));
+                        if stream {
+                            self.wanted.push(((dist / width) as f32 + 0.01, k));
+                        }
                     }
                 }
             }
             if all {
                 for k in kids {
-                    self.select(k, cam, c, fr);
+                    self.select(k, cam, c, fr, stream);
                 }
                 return true;
             }
@@ -1412,7 +1459,7 @@ impl World {
     /// each shadow cascade) decide what has to be rendered into the shadow maps.
     /// Also the tessellated cells of the terrain tiles, by the patch they are
     /// drawn with (`tess_cells`).
-    pub fn draw_lists(&self, cam: DVec3, focus: DVec3, casc: [f32; 3]) -> (Vec<(&TileGpu, [f32; 12])>, TessCells, Vec<DetailDraw<'_>>, Vec<TreeInst>) {
+    pub fn draw_lists(&self, cam: DVec3, focus: DVec3, casc: Option<[f32; 3]>) -> (Vec<(&TileGpu, [f32; 12])>, TessCells, Vec<DetailDraw<'_>>, Vec<TreeInst>) {
         let mut drawn = Vec::with_capacity(self.draw.len());
         let (clat, clon, calt) = geo::pos_to_lla(cam);
         let agl = calt - self.ground(clat, clon).map(|g| g.h).unwrap_or(0.0);
@@ -1421,7 +1468,7 @@ impl World {
             if let Some(Slot::Ready(t)) = self.tiles.get(id) {
                 let o = (t.center - cam).as_vec3();
                 let cell = id.width_m() / GRID as f64;
-                let tess = tess_block(*id, clat, clon, agl, cell);
+                let tess = if self.tessellate { tess_block(*id, clat, clon, agl, cell) } else { [0.0; 4] };
                 let cv = Self::cover_info(*id, base);
                 drawn.push((&**t, [o.x, o.y, o.z, cell as f32, id.z as f32, cv[0], cv[1], cv[2], tess[0], tess[1], tess[2], tess[3]]));
             }
@@ -1443,6 +1490,9 @@ impl World {
             }
         }
         let tiles: Vec<_> = drawn.into_iter().map(|(t, u)| (&t.gpu, u)).collect();
+        if self.draw_b.is_empty() {
+            return (tiles, tess, Vec::new(), Vec::new());
+        }
         let mut details = Vec::with_capacity(self.draw_b.len());
         let mut near_inst: Vec<TreeInst> = Vec::new();
         let mut tb = TreeBatcher::new();
@@ -1451,13 +1501,10 @@ impl World {
             let Some(g) = &b.gpu else { continue };
             let o = (b.center - cam).as_vec3();
             let dist = (o.length() as f64 - b.radius) as f32;
-            let fdist = ((b.center - focus).length() - b.radius) as f32;
-            let mut mask = 0u8;
-            for (c, r) in casc.iter().enumerate() {
-                if fdist < r * 1.45 {
-                    mask |= 1 << c;
-                }
-            }
+            let mask = casc.map_or(0, |casc| {
+                let fdist = ((b.center - focus).length() - b.radius) as f32;
+                casc.into_iter().enumerate().fold(0, |mask, (c, r)| mask | (((fdist < r * 1.45) as u8) << c))
+            });
             // (how far out trees are drawn and where they become impostors: the graphics settings)
             let imp_dist = IMP_DIST * self.tree_imp_k;
             if dist < self.tree_far + 100.0 && g.trees.is_some() {
@@ -1468,12 +1515,13 @@ impl World {
                         continue;
                     }
                     let seen = self.frustum.as_ref().map(|f| f.sphere(cp - cam, ch.radius as f64 + 25.0)).unwrap_or(true);
-                    let fd = (cp - focus).length() as f32 - ch.radius;
                     // The nearest cascade gets each tree's own model; the next one,
                     // with texels most of a metre across, one simple model for the
                     // whole chunk (no per-tree choice, so whole runs batch together).
-                    let cm = (fd < casc[0] * 1.45) as u8;
-                    let in_c1 = fd < casc[1] * 1.45;
+                    let (cm, in_c1) = casc.map_or((0, false), |casc| {
+                        let fd = (cp - focus).length() as f32 - ch.radius;
+                        ((fd < casc[0] * 1.45) as u8, fd < casc[1] * 1.45)
+                    });
                     if !seen && cm == 0 && !in_c1 {
                         continue;
                     }

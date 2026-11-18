@@ -28,10 +28,10 @@ fn u01(h: u32) -> f32 { return f32(h & 0xffffffu) / 16777216.0; }
 
 // How much of what lies d metres along this pixel's ray still shows through the
 // clouds and rain shafts drawn over the scene: the cloud pass keeps their
-// transmittance and (weighted) distance at half resolution.
+// transmittance and (weighted) distance at reduced resolution.
 fn cloud_cover(px: vec2f, d: f32) -> f32 {
   let dims = vec2i(textureDimensions(t_cloud)) - 1;
-  let c = clamp(vec2i(px * 0.5), vec2i(0), dims);
+  let c = clamp(vec2i(px / f32(cloud_pixel_divisor())), vec2i(0), dims);
   let T = textureLoad(t_cloud, c, 0).a;
   let dc = textureLoad(t_cdist, c, 0).r * 1000.0;
   if (dc <= 0.0) { return 1.0; }
