@@ -35,6 +35,37 @@ pub fn glass() -> egui::Frame {
     egui::Frame::new().fill(menu::GLASS).stroke(Stroke::new(1.0, menu::LINE)).corner_radius(menu::R_PANEL).inner_margin(egui::Margin::symmetric(14, 10))
 }
 
+pub(crate) fn fade_meshes(jobs: &mut [egui::ClippedPrimitive], opacity: f32) {
+    for job in jobs {
+        if let egui::epaint::Primitive::Mesh(mesh) = &mut job.primitive {
+            for vertex in &mut mesh.vertices {
+                vertex.color = vertex.color.gamma_multiply(opacity);
+            }
+        }
+    }
+}
+
+pub(crate) fn draw_primary_warning(painter: &egui::Painter, center: egui::Pos2, text: &str) {
+    let galley = painter.layout_no_wrap(text.to_owned(), menu::data(), Color32::WHITE);
+    let bounds = Rect::from_center_size(center, galley.size() + vec2(22.0, 8.0));
+    painter.rect_filled(bounds, 2.0, Color32::from_rgb(132, 27, 35));
+    painter.galley(center - galley.size() * 0.5, galley, Color32::WHITE);
+}
+
+pub(crate) fn readable_status(message: &str) -> String {
+    let text = if let Some(part) = message.strip_prefix("L ") {
+        format!("Left {}", part.to_lowercase())
+    } else if let Some(part) = message.strip_prefix("R ") {
+        format!("Right {}", part.to_lowercase())
+    } else if message.chars().any(char::is_lowercase) {
+        return message.to_owned();
+    } else {
+        let mut letters = message.chars();
+        letters.next().map_or_else(String::new, |first| format!("{first}{}", letters.as_str().to_lowercase()))
+    };
+    text.replace(" gone", " lost").replace(" dead", " failed")
+}
+
 pub(crate) fn tools_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(Color32::from_rgba_unmultiplied(13, 19, 27, 247))
@@ -43,6 +74,10 @@ pub(crate) fn tools_frame() -> egui::Frame {
 }
 
 impl Game {
+    pub(crate) fn flight_toolbar_visible(&self) -> bool {
+        self.flight_tools_open || self.real - self.toolbar_t < BAR_LINGER
+    }
+
     /// Draws the toolbar when it is wanted; a press goes into `bar`.
     pub(crate) fn toolbar(&mut self, ctx: &egui::Context, bar: &mut Option<Bar>) {
         let screen = ctx.content_rect();
@@ -53,7 +88,7 @@ impl Game {
         if self.flight_tools_open || (near_top && !self.toolbar_hover_blocked) {
             self.toolbar_t = self.real;
         }
-        let want = self.real - self.toolbar_t < BAR_LINGER;
+        let want = self.flight_toolbar_visible();
         let show = ctx.animate_bool_with_time_and_easing(egui::Id::unique("toolbar_show"), want, 0.2, egui::emath::easing::cubic_out);
         if show <= 0.0 {
             return;
@@ -173,7 +208,7 @@ impl Game {
         }
         if !notes.is_empty() {
             // under the toolbar while it is down
-            let top = if self.real - self.toolbar_t < BAR_LINGER { 65.0 } else { 14.0 };
+            let top = if self.flight_toolbar_visible() { 65.0 } else { 14.0 };
             let y = ctx.animate_value_with_time(egui::Id::unique("notes_y"), top, 0.2);
             egui::Area::new(egui::Id::unique("notices")).anchor(Align2::CENTER_TOP, [shift, y]).interactable(false).show(ctx, |ui| {
                 ui.set_max_width((view_width - 24.0).max(100.0));
