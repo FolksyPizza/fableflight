@@ -22,6 +22,7 @@ enum Tile {
     Settings,
     /// straight back into the air where the last flight started
     Again,
+    SavedFlight,
 }
 
 impl Game {
@@ -34,6 +35,8 @@ impl Game {
         let mut press: Option<Tile> = None;
         let mut quit = false;
         let again = self.last_start_label();
+        let saved = self.saved_flight.as_ref().map(|flight| flight.aircraft_name().to_string());
+        let resume = saved.as_deref().map(|plane| (t!("Saved checkpoint", "Point de reprise"), plane));
         egui::Area::new(egui::Id::unique("main_menu")).order(egui::Order::Background).fixed_pos(screen.min).show(ctx, |ui| {
             let p = ui.painter().clone();
             // Darken space towards the foot of the screen, for depth.
@@ -41,7 +44,7 @@ impl Game {
 
             let (fw, fh, sw, gap, settings_h) = (620.0, 390.0, 310.0, 16.0, 58.0);
             let top = 95.0;
-            let below = if again.is_some() { 68.0 } else { 0.0 };
+            let below = (u8::from(again.is_some()) + u8::from(resume.is_some())) as f32 * 58.0;
             let k = ((screen.width() - 40.0) / (fw + sw + gap)).min((screen.height() - top - 62.0) / (fh + below)).clamp(0.32, 1.15);
             let x = screen.center().x - (fw + sw + gap) * k * 0.5;
             let y = screen.top() + top + ((screen.height() - top - 62.0) - (fh + below) * k).max(0.0) * 0.5;
@@ -69,15 +72,24 @@ impl Game {
                 press = Some(Tile::Settings);
             }
 
-            // Under FLY: the last flight's start, one press away.
-            if let Some((place, plane)) = &again {
-                let b = Rect::from_min_size(pos2(fly.left(), fly.bottom() + 12.0 * k), vec2(fly.width(), 46.0 * k.max(0.7)));
-                let r = ui.interact(b, ui.scope_id().with("again"), Sense::click());
-                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("Fly again", "Revoler")));
-                again_button(&p, b, &r, place, plane);
+            let last = again.as_ref().map(|(place, plane)| (place.as_str(), *plane));
+            let mut row_y = fly.bottom() + 12.0 * k;
+            for (tile, details, title, id) in [
+                (Tile::SavedFlight, resume, t!("Resume saved flight", "Reprendre le vol enregistré"), "resume"),
+                (Tile::Again, last, t!("Fly again", "Revoler"), "again"),
+            ] {
+                let Some((place, plane)) = details else { continue };
+                let b = Rect::from_min_size(pos2(fly.left(), row_y), vec2(fly.width(), 46.0 * k));
+                row_y += 58.0 * k;
+                let r = ui.interact(b, ui.scope_id().with(id), Sense::click());
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, title));
+                again_button(&p, b, &r, title, place, plane);
                 if r.clicked() {
-                    press = Some(Tile::Again);
+                    press = Some(tile);
                 }
+            }
+            if resume.is_some() && let Some(message) = &self.save_message {
+                p.text(pos2(fly.left(), row_y), Align2::LEFT_TOP, message, menu::caption(), DIM);
             }
 
             // The foot: Quit at the left, the gamepad's buttons (or a word on the keys) in the middle.
@@ -107,6 +119,7 @@ impl Game {
             Some(Tile::Fly) => self.menu.screen = Screen::Fly,
             Some(Tile::Aircraft) => self.open_aircraft(hangar_ui::Tab::Mine, Screen::Main),
             Some(Tile::Settings) => self.menu.screen = Screen::Settings,
+            Some(Tile::SavedFlight) => self.resume_saved_flight(),
             Some(Tile::Again) => {
                 self.restore_last_start();
                 self.menu.screen = Screen::Fly;
@@ -124,7 +137,7 @@ impl Game {
 }
 
 /// "Fly again": a slim bar under FLY with the last start and aircraft.
-fn again_button(p: &Painter, r: Rect, resp: &egui::Response, place: &str, plane: &str) {
+fn again_button(p: &Painter, r: Rect, resp: &egui::Response, title: &str, place: &str, plane: &str) {
     let lit = menu::ease(p.ctx(), resp.id, resp.hovered() || resp.has_focus());
     p.rect_filled(r, menu::R_WIDGET, menu::mix(Color32::from_rgba_premultiplied(12, 16, 22, 226), Color32::from_rgba_premultiplied(26, 32, 42, 238), lit));
     p.rect_stroke(r, menu::R_WIDGET, Stroke::new(1.0, menu::mix(Color32::from_white_alpha(26), ACCENT, lit)), egui::StrokeKind::Inside);
@@ -138,8 +151,9 @@ fn again_button(p: &Painter, r: Rect, resp: &egui::Response, place: &str, plane:
     let end = *pts.last().unwrap();
     p.line(pts, Stroke::new(1.8, col));
     p.add(egui::Shape::convex_polygon(vec![end + vec2(3.5, -3.5), end + vec2(4.0, 3.0), end + vec2(-2.5, 1.5)], col, Stroke::NONE));
-    p.text(pos2(r.left() + 44.0, r.center().y), Align2::LEFT_CENTER, t!("Fly again", "Revoler"), menu::label(), menu::mix(TEXT, Color32::WHITE, lit));
-    let right = Rect::from_min_max(pos2(r.left() + 125.0, r.top()), r.right_bottom() - vec2(16.0, 0.0));
+    p.text(pos2(r.left() + 44.0, r.center().y), Align2::LEFT_CENTER, title, menu::label(), menu::mix(TEXT, Color32::WHITE, lit));
+    let label_width = p.layout_no_wrap(title.to_string(), menu::label(), TEXT).size().x;
+    let right = Rect::from_min_max(pos2(r.left() + 56.0 + label_width, r.top()), r.right_bottom() - vec2(16.0, 0.0));
     if right.width() > 40.0 {
         let font = menu::caption();
         let mut job = egui::text::LayoutJob::simple_singleline(format!("{place}  ·  {plane}"), font, DIM);

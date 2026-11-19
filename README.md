@@ -23,15 +23,45 @@ Explore the skies with real-world weather, live air traffic, and an immersive op
   </video>
 </div>
 
-# Compiling
-* Install rust
-```
-cargo build --release
+## Build and run
+
+Install the [current stable Rust toolchain](https://rustup.rs/). If Rust is already installed through rustup, run `rustup update stable`. Clone the fork and open the checkout.
+
+```sh
+git clone https://github.com/FolksyPizza/fableflight.git
+cd fableflight
 ```
 
-running
+**Linux**
+
+Install the build dependencies for your distribution.
+
+| Distribution | Command |
+| --- | --- |
+| Debian or Ubuntu | `sudo apt install build-essential pkg-config libasound2-dev libudev-dev` |
+| Fedora | `sudo dnf install gcc pkgconf-pkg-config alsa-lib-devel systemd-devel` |
+| Arch Linux | `sudo pacman -S --needed base-devel pkgconf alsa-lib systemd-libs` |
+
+```sh
+./scripts/build-linux.sh
+cargo run --release --locked
 ```
-cargo run --release
+
+If the helper reports missing libraries, install the packages above and check `pkg-config --modversion alsa libudev`. If the compiler or linker is killed during the release build, try thin link-time optimization and fewer build jobs.
+
+```sh
+CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 ./scripts/build-linux.sh --jobs 2
+./target/release/fablegame
+```
+
+If the app builds but cannot open a graphics adapter, check that your graphics driver exposes Vulkan.
+
+**macOS and Windows**
+
+On macOS, install the Xcode command-line tools with `xcode-select --install` if needed. On Windows, use the stable Rust MSVC toolchain and the C++ build tools for Visual Studio.
+
+```sh
+cargo run --release --locked
 ```
 
 To install the executable from this checkout, run `cargo install --path . --locked --bin fablegame`, then launch it with `fablegame`.
@@ -62,7 +92,7 @@ FableFlight keeps downloaded imagery, elevation and map tiles for reuse. To free
 
 To remove FableFlight and its data, quit the game first. Run `cargo uninstall fablegame` if you installed it with Cargo. If you built it from source, remove the checkout’s `target` directory to remove the build, or remove the entire checkout if you no longer need it. If you copied the executable elsewhere, delete that copy too.
 
-Remove the following FableFlight folders to delete downloaded maps and materials, settings, bindings, the saved Google API key, downloaded aircraft and app-managed captures. Back up any custom aircraft or captures you want to keep.
+Remove the following FableFlight folders to delete downloaded maps and materials, settings, bindings, the saved Google API key, downloaded aircraft, the local flight checkpoint and app-managed captures. Back up any custom aircraft or captures you want to keep.
 
 | Platform | Cache | Settings and user data |
 | --- | --- | --- |
@@ -89,7 +119,11 @@ The interface is in English or French. It follows the system language, can be ch
 
 **Q / E** steer the nose wheel on the ground and move the rudder in flight. Hold **Backslash** with **Q / E** for finer corrections. Both keyboard rudder strengths can be adjusted under **Settings → Controls → Keyboard rudder**, and the fine-control key can be rebound. Hold **left / right Option** on Mac, or **left / right Alt** on other keyboards, for the corresponding toe brake. **B** applies both brakes. **Settings → Controls → Ground handling** has a runway steering assist. It is on by default for runway departures and helps hold the centreline during the takeoff roll. Steering and brake input take priority. Braking and cornering share the tires’ available grip, which matters when using the pedals during a crosswind rollout. The visual landing gates follow the nearby ILS tuned on NAV 1 or the selected runway. They appear ahead when lined up on final and can be hidden by terrain or the aircraft.
 
-Press **Home** or click the right stick to recenter the cockpit or chase view. **Tab** opens the in-flight toolbar. Choose a section to open its side panel. Press **Tab** again to close both. In stable airborne flight, **Menu Hold** maintains heading and altitude while the toolbar is open, and holds airspeed if there is no external throttle input. Firm flight-control input cancels the hold for that session. An autopilot you engaged yourself keeps its selected modes. In **Tab → Autopilot → Flight plan**, add airports by ICAO or IATA code and choose **Follow route**. The autopilot sequences the airports and holds your current altitude as it tracks the route. Near the destination, enter the runway and use **Arm ILS approach** when the localizer is ahead and in range. Take control for the flare, rollout and taxi.
+Press **Home** or click the right stick to recenter the cockpit or chase view. **Tab** opens the in-flight toolbar. Choose a section to open its side panel. Press **Tab** again to close both. In stable airborne flight, **Menu Hold** maintains heading and altitude while the toolbar is open, and holds airspeed if there is no external throttle input. Firm flight-control input cancels the hold for that session. An autopilot you engaged yourself keeps its selected modes. Open **Tab → Autopilot → Route and arrival**, add airports by ICAO or IATA code, and choose **Follow route**. The autopilot sequences the airports and climbs as needed toward an estimated cruise target. Enter a cruise altitude in feet MSL to request a different target. The terrain estimate uses sampled elevation, so check terrain and obstacles yourself. Select a runway from the arrival list. **Arm ILS approach** is available when a usable localizer is ahead and in range.
+
+**Pilot assistance** includes an optional stability aid and **Automatic takeoff** for an engine-running Cessna 172RG lined up near the start of a paved runway. The helper steers the takeoff roll, rotates, and transitions to an autopilot climb. To try **Automatic landing**, use a Cessna 172RG on a stabilized final with the landing gear and approach flaps set. Select the runway and engage the helper for final tracking, flare, and braking to a stop. With a usable ILS ahead, you can also arm automatic landing before final. The system takes over after the localizer and glide slope are captured and the aircraft is configured and stable. Runway automation requires loaded scenery, a paved runway at least 1,100 m long and 20 m wide, and light crosswind and tailwind. Press **F5** or make a firm control input to take over. Taxi manually after the stop.
+
+To continue another time, open the pause menu and choose **Save flight**. The main menu's **Resume saved flight** loads that local checkpoint, including the aircraft state and remaining route. Saving is available in the air or while stationary on the ground, and replaces the previous checkpoint. Re-engage autopilot manually after resuming.
 
 The flight HUD shows wind direction and speed, ground track, fuel remaining, angle of attack (AOA) and vertical speed. Wind direction is where the wind comes from. The arrow points where it is blowing relative to the aircraft. Urgent warnings such as **PULL UP** and **STALL** appear in the attitude display. Aircraft condition and recent failures appear in a compact panel. Press **H** to toggle the HUD in the current view.
 

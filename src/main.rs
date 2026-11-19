@@ -25,6 +25,8 @@ mod hangar_ui;
 mod bind;
 mod preflight;
 mod flightplan;
+mod pilot_assist;
+mod flight_save;
 mod i18n;
 mod jsbsim;
 mod live;
@@ -96,6 +98,7 @@ pub const HUD_W: f32 = 410.0;
 #[derive(Copy, Clone)]
 enum PauseAct {
     Resume,
+    SaveFlight,
     Respawn,
     GoTo,
     FlyTo(f64, f64, &'static str),
@@ -815,7 +818,7 @@ struct DepartureIntro {
 }
 
 impl DepartureIntro {
-    const DURATION: f64 = 1.05;
+    const DURATION: f64 = 1.70;
 
     fn new(from: DVec3, eye: DVec3) -> Self {
         Self { from, eye, elapsed: 0.0, motion_start: 0.0, motion_duration: Self::DURATION }
@@ -838,17 +841,19 @@ impl DepartureIntro {
 
     fn camera(&self) -> DVec3 {
         let to = self.eye;
-        let t = Loading::ease((self.elapsed - self.motion_start) / self.motion_duration);
+        let progress = (self.elapsed - self.motion_start) / self.motion_duration;
+        let turn_progress = Loading::ease(progress / 0.84);
+        let altitude_progress = Loading::ease((progress - 0.10) / 0.90);
         let from_up = self.from.normalize();
         let turn = DQuat::from_rotation_arc(from_up, to.normalize());
-        let up = DQuat::IDENTITY.slerp(turn, t) * from_up;
+        let up = DQuat::IDENTITY.slerp(turn, turn_progress) * from_up;
         let start = (self.from.length() - geo::R).max(1.0).ln();
         let end = (to.length() - geo::R).max(1.0).ln();
-        up * (geo::R + (start + (end - start) * t).exp())
+        up * (geo::R + (start + (end - start) * altitude_progress).exp())
     }
 
     fn menu_opacity(&self) -> f32 {
-        (1.0 - Loading::ease(self.elapsed / 0.55)) as f32
+        (1.0 - Loading::ease((self.elapsed - 0.04) / 0.91)) as f32
     }
 }
 
@@ -1208,6 +1213,10 @@ struct Game {
     pad_fixed: Vec<[u8; 16]>,
     /// the autopilot (autopilot.rs), and when it last let go (its warning)
     ap: autopilot::Autopilot,
+    runway_pilot: Option<pilot_assist::RunwayPilot>,
+    stability_assist: bool,
+    saved_flight: Option<flight_save::FlightSave>,
+    save_message: Option<String>,
     flight_plan: flightplan::FlightPlan,
     taxi_route: Vec<(f64, f64)>,
     ap_off_t: f64,
@@ -1552,7 +1561,7 @@ impl Game {
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { prefs.cam_mode }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
             utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], gfx, gfx_applied: None, prev_plane: Mat4::IDENTITY, plane_box, lamps,
             frame: 0, fps: 60.0, fps_log: (args.fps_log, Instant::now(), 0, 0.0), paused: false, show_help: false, show_hud: !args.no_hud && prefs.show_hud, hud_cockpit: prefs.hud_cockpit, arcade: args.arcade || prefs.arcade, goto_open: false, goto_text: String::new(), goto_rx: None,
-            status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, stage_at: args.stage_at, engines: args.engines, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, pad_y: false, pad_y_combo: false, ap: autopilot::Autopilot::default(), flight_plan: Default::default(), taxi_route: Vec::new(), ap_off_t: -100.0, ap_script: args.ap_script.clone(), cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
+            status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, stage_at: args.stage_at, engines: args.engines, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, pad_y: false, pad_y_combo: false, ap: autopilot::Autopilot::default(), runway_pilot: None, stability_assist: false, saved_flight: flight_save::FlightSave::load(), save_message: None, flight_plan: Default::default(), taxi_route: Vec::new(), ap_off_t: -100.0, ap_script: args.ap_script.clone(), cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
             record: args.record.clone(), rec_audio: Vec::new(), rec_n: 0, rec_t0: Instant::now(), sound_on: prefs.sound_on, volume: prefs.volume, flight_tools_open: false, info_open: false, menu_hold: None, menu_hold_pending: false, info_page: menu::Page::Flight, pause_open: false, pause_page: menu::Page::Game, pause_at: args.pause_menu, settings_sec: args.settings.unwrap_or(settings_ui::Section::General), look_sens: prefs.look_sens, head: cockpit::Head::new(cy.to_radians(), cp), cockpit_fov: args.fov.unwrap_or(prefs.cockpit_fov).clamp(30.0, 90.0), head_live: false, warn: audio::Warn::default(), warn_t: [-10.0; 4],
             g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, quit: false,
@@ -1945,7 +1954,9 @@ impl Game {
         self.taxi_route.clear();
         self.set_flight_tools(false);
         self.ap.disengage();
+        self.runway_pilot = None;
         self.flight_plan.follow = false;
+        self.flight_plan.auto_ils = None;
         self.hold_spot = None;
         self.runway_steering = None;
         self.plane.parking_brake = false;
@@ -2432,8 +2443,19 @@ impl Game {
             self.plane.trim = (self.plane.trim + trim * 0.035 * dt).clamp(-0.05, 0.24);
         }
         self.gamepad(dt, &mut c);
+        let previous_throttle = self.throttle_axis;
         self.joystick(&mut c);
-        self.autopilot(dt, &mut c);
+        if self.runway_pilot.is_some()
+            && previous_throttle.zip(self.throttle_axis).is_some_and(|(old, new)| (old - new).abs() > 0.045)
+        {
+            self.ap_disconnect(Some(autopilot::Off::Pilot));
+        }
+        if self.runway_pilot.is_none() {
+            self.autopilot(dt, &mut c);
+            if self.stability_assist && !self.ap.on && self.runway_pilot.is_none() && self.menu_hold.is_none() {
+                pilot_assist::stabilize(&self.plane, &mut c);
+            }
+        }
         c.brake |= self.plane.parking_brake;
         if let Some(t) = self.crash_at {
             if self.real > t && !self.crashed {
@@ -2836,6 +2858,9 @@ impl Game {
             return;
         }
         let s = autopilot::State::of(&self.plane);
+        if self.try_automatic_landing(c) {
+            return;
+        }
         self.update_flight_plan(&s);
         let r = {
             let nav = self.radios.nav.as_ref().map(|st| autopilot::Nav { st, reading: nav::nav_reading(st, self.radios.obs, self.plane.pos), obs: self.radios.obs });
@@ -2898,7 +2923,11 @@ impl Game {
     fn ap_disconnect(&mut self, why: Option<autopilot::Off>) {
         use autopilot::Off;
         self.ap.disengage();
+        self.runway_pilot = None;
         self.flight_plan.follow = false;
+        if self.flight_plan.auto_ils.take().is_some() {
+            self.flight_plan.message = None;
+        }
         self.ap_off_t = self.real;
         log::info!("autopilot off: {why:?}");
         self.status = match why {
@@ -2915,7 +2944,7 @@ impl Game {
     fn ap_toggle(&mut self) {
         self.menu_hold = None;
         self.menu_hold_pending = false;
-        if self.ap.on {
+        if self.ap.on || self.runway_pilot.is_some() {
             self.ap_disconnect(None);
             return;
         }
@@ -2944,6 +2973,7 @@ impl Game {
     /// A lateral mode button: picks it (and engages the autopilot), or, pressed again, back to HDG.
     fn ap_lat(&mut self, m: autopilot::Lat) {
         self.flight_plan.follow = false;
+        self.runway_pilot = None;
         let s = autopilot::State::of(&self.plane);
         let m = if self.ap.on && self.ap.lat == m && m != autopilot::Lat::Hdg { autopilot::Lat::Hdg } else { m };
         // (Off, nothing set yet: the heading and altitude of the moment.)
@@ -2962,6 +2992,7 @@ impl Game {
     }
 
     fn ap_vert(&mut self, m: autopilot::Vert) {
+        self.runway_pilot = None;
         let s = autopilot::State::of(&self.plane);
         if !self.ap.on && self.ap.alt == 0.0 {
             self.ap.sync(&s);
@@ -2981,6 +3012,10 @@ impl Game {
         use autopilot::{Lat, Vert};
         use egui::RichText;
         use menu::{ACCENT, DIM};
+        self.pilot_assist_ui(ui);
+        self.flight_plan_ui(ui);
+        ui.separator();
+        menu::heading(ui, t!("Flight director", "Directeur de vol"));
         let s = autopilot::State::of(&self.plane);
         let (on, armed) = self.ap.annunciation();
         let green = egui::Color32::from_rgb(120, 230, 140);
@@ -3079,7 +3114,6 @@ impl Game {
             "F5 autopilot on/off · 7 HDG · 8 NAV · 9 APR (ILS) · 0 ALT · − / = heading bug · ; / ' altitude. NAV and APR follow NAV 1 (Radio page). A firm push on the controls disconnects it.",
             "F5 pilote automatique · 7 HDG · 8 NAV · 9 APR (ILS) · 0 ALT · − / = consigne de cap · ; / ' altitude. NAV et APR suivent la NAV 1 (page Radios). Une action franche sur les commandes le déconnecte."
         )).size(11.5).color(DIM));
-        self.flight_plan_ui(ui);
     }
 
     fn radio_page(&mut self, ui: &mut egui::Ui) {
@@ -3852,6 +3886,7 @@ impl Game {
         self.flight_ended = None;
         self.preflight = None;
         self.flight_plan = Default::default();
+        self.runway_pilot = None;
         self.taxi_route.clear();
         self.loading = None;
         self.departure_intro = None;
@@ -4775,7 +4810,7 @@ impl Game {
         // Physics at a fixed step.
         let mut c = self.controls(dt_real);
         if let Some(runway) = self.runway_steering
-            && self.runway_assist && dt > 0.0 && !self.crashed
+            && self.runway_pilot.is_none() && self.runway_assist && dt > 0.0 && !self.crashed
         {
             let height = (self.plane.pos - runway.origin).dot(self.plane.pos.normalize());
             if !self.plane.on_ground && height > 10.0 {
@@ -4799,7 +4834,8 @@ impl Game {
             let h = 1.0 / 180.0;
             while self.acc >= h {
                 self.acc -= h;
-                let imp = self.plane.step(h, &c, &self.world);
+                let controls = self.runway_controls(&c, h);
+                let imp = self.plane.step(h, &controls, &self.world);
                 let collision = self.collision_override.unwrap_or(self.collision_mode);
                 if collision != settings::CollisionMode::Detailed {
                     let stopped_wreck = (self.plane.on_ground || self.plane.on_hull) && self.plane.wrecked();
@@ -6575,6 +6611,12 @@ impl Game {
             if menu::big_button(ui, t!("Respawn in the air", "Réapparaître en vol"), Hint::of("R", ""), false, false).clicked() {
                 *act = Some(PauseAct::Respawn);
             }
+            if self.can_save_flight() && menu::big_button(ui, t!("Save flight", "Enregistrer le vol"), Hint::None, false, false).clicked() {
+                *act = Some(PauseAct::SaveFlight);
+            }
+            if let Some(message) = &self.save_message {
+                ui.label(RichText::new(message).font(menu::caption()).color(DIM));
+            }
             // Leaving: back to the globe for a new start (its Menu button goes on to the main menu).
             if menu::big_button(ui, t!("End flight", "Terminer le vol"), Hint::Text(t!("pick a new start", "choisir un nouveau départ")), false, false).clicked() {
                 *act = Some(PauseAct::Globe);
@@ -7658,6 +7700,7 @@ impl Game {
         }
         match act {
             Some(PauseAct::Resume) => self.set_pause_menu(false),
+            Some(PauseAct::SaveFlight) => self.save_flight(),
             Some(PauseAct::Respawn) => {
                 self.set_pause_menu(false);
                 self.set_flight_tools(false);
