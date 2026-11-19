@@ -106,6 +106,39 @@ pub const STRINGS: &[&str] = &[
     // The Blackbird's cockpits (sr71/pit.rs).
     "TEB", "OXY", "UHF", "TACAN", "LIGHTS", "DEF", "SAS", "AUTOPILOT", "SPIKE", "FWD BYPASS", "AFT BYPASS", "L UNSTART", "R UNSTART", "CIT", "FUEL LOW", "CG", "PITOT HEAT", "OIL PRESS", "SENSOR", "VIEWSIGHT", "RADAR", "MAP PROJ",
     "ALT AUTO", "FIXED PROP", "THR PROP MIX", "COWL FLAPS", "SPARE", "SUCTION", "BOTH", "MIXTURE", "THROTTLE", "IGNITION", "BOOST", "BAT", "FUEL PUMP", "PITOT HT",
+    // The G650's flight deck (g650/deck.rs).
+    "10", "20", "39", "A/T", "ACRT", "AFT CABIN", "AIL", "ALTITUDE", "ALTN GEAR", "ANTI-ICE HTR", "AP", "APPR", "APU CONTROL", "BATT", "BC",
+    "BLEED AIR", "BRAKE PRESS", "CABIN", "CABIN ALT FT", "CABIN PRESS CTL", "CAS", "CHART", "CHECK LDG GEAR", "CKLST", "COCKPIT", "COCKPIT LIGHTS",
+    "CONT IGN", "CRS 1", "CRS 2", "DIR", "DN LOCK REL", "DSPL BRT", "ELEC POWER CTL", "EMER", "EMERGENCY POWER", "ENGINE START", "EXT",
+    "EXTERIOR LIGHTS", "FIRE DETECTION", "FIRE EXT", "FLCH", "FLT CTRL RESET", "FMS", "FPLN", "FUEL RETURN", "FUEL SYSTEM", "GND SPLR ORIDE",
+    "GULFSTREAM", "HEADING", "HONEYWELL", "HORN SILENCE", "HYDRAULIC", "INFO", "INTERTANK", "IRS 1", "IRS 2", "IRS 3", "IRS MODE SELECT", "L ALT",
+    "L COWL", "L ENG", "L LDG", "L MAIN", "L VOLTS", "L WING", "LDG GEAR DUMP", "LIGHTING", "LOW BANK", "MAIN BATTERIES", "MAIN EMER BATT",
+    "MASTERS", "MFD DSPL SWITCH", "QX-GLF", "NEXT", "OXYGEN", "PARK EMER BRAKE", "PASS WARN", "PEDAL STEERING", "PERF", "PFD", "PITCH", "PLAN",
+    "PREV", "PULL TO DEPLOY", "PUSH STD", "R ALT", "R COWL", "R ENG", "R LDG", "R MAIN", "R VOLTS", "R WING", "RAAS INHB", "RADIO",
+    "RAM AIR TURBINE", "RAT", "RECOG", "REMOTE FUELING", "RET", "RUD", "SEAT BELT", "SELCAL ABCD", "SMC 1", "SMC 2", "SOUND OFF", "SPEED", "STANDBY",
+    "START", "STOP", "SYN", "SYNC", "SYSTEM TEST", "TAIL", "TEMP CONTROL", "TRAF", "TRIM", "VIDEO", "VS", "VS/FPA", "VSD", "WSHLD HEAT", "WX",
+    "XFLOW", "YD",
+    // The G650's displays (deck650.wgsl).
+    "ROLL", "PTCH", "ASEL", "AP1", "VOR1", "LOC1", "ITT", "OIL TEMP", "HYD PRESS", "FUEL QTY", "TOTAL", "LB", "AIRCRAFT CONFIG", "GEAR NOT DOWN", "L-R", "OIL PRESS LOW", "GEN OFF", "FUEL LEVEL LOW", "SPEEDBRAKE EXT", "MAIN BATT DISCH", "PARKING BRAKE", "REV DEPLOYED", "PITCH TRIM", "ROLL TRIM", "RUDDER TRIM", "NU", "ND", "SPD BRK", "FLIGHT CONTROLS", "FCC 1", "FCC 2", "NAV 1", "PROGRESS", "ACTIVE FLT PLAN", "SVS", "FL", "---",
+    // The G650's overhead, circuit breakers and MCDU keys: their real legends (g650/deck.rs).
+    "A", "B", "C", "D", "F", "H", "J", "K", "O", "P", "Q", "U", "V", "Z", "SP", "/", ".", "+/-", "NO SMOKE", "OVHD PNL", "PED PNL", "MASTER CONTROL",
+    "CB PANELS", "OVHD FLOOD", "ANTI ICE HTR", "WINDSHIELD HEAT", "EVS WSHLD HT", "CABIN WDO HT", "PROBE 1", "PROBE 2", "PROBE 3", "PROBE 4", "LF/RS",
+    "RF/LS", "CRANK", "CONTROL", "PTU", "OFF/ARM", "AUX PUMP", "VOLTS/AMPS", "ELECTRICAL", "POWER CONTROL", "L BUS TIE", "R BUS TIE", "APU GEN",
+    "L GEN", "GND SVC BUS", "R GEN", "FLT CTRL", "BATTERIES", "EBHA", "UPS", "GEN", "ANTI ICE", "L TANK", "R TANK", "INTER TANK", "X FLOW",
+    "OFF/AUTO", "SHUTOFF", "CABIN/GALLEY", "60 HZ", "CABIN PRESSURE", "MAN", "FLIGHT", "DFRN PRESS", "RC", "FPM X 1000", "FWD CABIN", "COLD", "HOT",
+    "ISOLATION", "L PACK", "RAM AIR", "R PACK", "AUTO TEMP", "SELECT", "TEMP DISPLAY", "ICE DET", "SMOKE DET", "ANN LIGHTS", "DOOR OPEN",
+    "DOOR SAFETY", "FDR/CMC EVENT", "VALVES", "FIRE TEST", "LOOP A", "LOOP B", "FAULT TEST", "MFD DISPLAY", "SWITCHING", "PILOT", "COPILOT",
+    "DISPLAY SYSTEM", "ICE", "PULSE", "WING TIP", "WHL WELL", "CLOCK 1", "MAGNETOMETER 1", "AHRS 1", "MAU 3B PRI", "MAU 3A PRI", "MAU 2B SEC",
+    "MAU 2A SEC", "MAU 1B SEC", "MAU 1A PRI", "HUD FAN/VIDEO", "AMP", "HUD PWR 1", "DU 1", "DU 2", "DU 4 SEC", "ADS STBY CH 3B", "ADS STBY CH 4B",
+    "ADS 3 CH 3A", "ADS 3 CH 4A", "MCDU 1", "CMC SHUTDOWN", "PWR", "FLT GUID PNL 1", "MAU 1 TONE GEN", "L MAIN PUMP", "L FADEC CH A", "R FADEC CH A",
+    "DOOR CTRL/WARN", "AP PITCH SERVO", "AP ROLL SERVO 1", "L/R IGN 1", "L/R START A", "L HPSOV", "FIRE EXT SHOT 1", "LDG GEAR CTRL 1",
+    "INBD BRAKE CTRL", "APU DOOR", "APU CTRL 1", "APU PWR 1", "APU FIRE EXT", "L GCU PWR", "ATC 1", "NAV RCVR 1", "VHF COMM 1", "L SSPC CH 1",
+    "R SSPC CH 1", "TRU CTRL 1", "CLOCK 2", "MAGNETOMETER 2", "AHRS 2", "MAU 3B SEC", "MAU 3A SEC", "MAU 2B PRI", "MAU 2A PRI", "MAU 1B PRI",
+    "MAU 1A SEC", "HUD PWR 2", "DU 4 PRI", "DU 3", "ADS 2 CH 2B", "ADS 2 CH 1B", "ADS 1 CH 2A", "ADS 1 CH 1A", "MCDU 3", "FLT GUID PNL 2",
+    "MAU 2 TONE GEN", "R MAIN PUMP", "L FADEC CH B", "R FADEC CH B", "AP ROLL SERVO 2", "L/R IGN 2", "L/R START B", "R HPSOV", "THROT QUAD",
+    "FIRE EXT SHOT 2", "LDG GEAR IND", "LDG GEAR CTRL 2", "OUTBD BRAKE", "CTRL", "APU CTRL 2", "APU PWR 2", "R GCU PWR", "ATC 2", "NAV RCVR 2",
+    "VHF COMM 2", "L SSPC CH 2", "R SSPC CH 2", "BATT BUS CONT", "TRU CTRL 2", "COPILOT ACP", "OBSERVER ACP", "FLT INSTRUMENTS", "FLT CTRL/LDG",
+    "ENG SYS/FUEL", "COM/NAV",
 ];
 
 /// Index of a string in `STRINGS` (panics if it is missing: a typo in the layout).
@@ -2254,10 +2287,10 @@ mod tests {
 
     #[test]
     fn plane_shader_validates() {
-        let src = format!("{}\n{}\n{}\n{}\n{}", include_str!("../../shaders/common.wgsl"), include_str!("../../shaders/plane.wgsl"), strings_wgsl(), include_str!("../../shaders/deck747.wgsl"), include_str!("../../shaders/pit18.wgsl"));
+        let src = format!("{}\n{}\n{}\n{}\n{}\n{}", include_str!("../../shaders/common.wgsl"), include_str!("../../shaders/plane.wgsl"), strings_wgsl(), include_str!("../../shaders/deck747.wgsl"), include_str!("../../shaders/pit18.wgsl"), include_str!("../../shaders/deck650.wgsl"));
         // the generic shader, and each kind's specialised one (render.rs `specialise`).
         let mut all = vec![src.clone()];
-        all.extend((0..8).map(|k| crate::render::specialise(&src, k)));
+        all.extend((0..10).map(|k| crate::render::specialise(&src, k)));
         assert!(all[1].contains("const KIND: u32 = 0u;") && all[1].contains("const INSTR: u32 = 0u;"), "specialise found nothing to rewrite");
         for src in &all {
             let m = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));

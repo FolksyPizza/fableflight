@@ -194,8 +194,10 @@ pub struct Globals {
     /// (+ fly right), glide slope needle -1..1 (+ fly up), OBS (degrees),
     /// flags (1 alive, 2 TO, 4 FROM, 8 glide slope alive)
     pub nav: [f32; 4],
-    /// Cessna instruments, radio receivers and heading-up navigation plot.
-    pub cockpit: [[f32; 4]; 8],
+    /// Cessna instruments, radio receivers and heading-up navigation plot
+    /// (rows 0-7); the autoflight and systems state the glass cockpits show
+    /// (rows 8-11, main.rs `cockpit_globals`, read by deck650.wgsl).
+    pub cockpit: [[f32; 4]; 12],
 }
 
 /// Raindrops drawn around the camera in rain (as many as the rain is heavy show).
@@ -1547,7 +1549,7 @@ impl Renderer {
         let m_photo = module("photo", include_str!("shaders/photo.wgsl"));
         let facade = include_str!("shaders/facade.wgsl");
         let m_build = module("buildings", &format!("{facade}\n{}", include_str!("shaders/buildings.wgsl")));
-        let obj_src = format!("{}\n{}\n{}\n{}", include_str!("shaders/plane.wgsl"), crate::aircraft::b747::deck::strings_wgsl(), include_str!("shaders/deck747.wgsl"), include_str!("shaders/pit18.wgsl"));
+        let obj_src = format!("{}\n{}\n{}\n{}\n{}", include_str!("shaders/plane.wgsl"), crate::aircraft::b747::deck::strings_wgsl(), include_str!("shaders/deck747.wgsl"), include_str!("shaders/pit18.wgsl"), include_str!("shaders/deck650.wgsl"));
         let m_obj = module("plane", &obj_src);
         let obj_src = std::sync::Arc::new(format!("{common}\n{obj_src}"));
         let sky = include_str!("shaders/sky.wgsl");

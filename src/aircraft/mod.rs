@@ -14,6 +14,7 @@ pub mod dr400;
 pub mod f22;
 pub mod f4;
 pub mod fa18;
+pub mod g650;
 pub mod sr71;
 pub mod starship;
 
@@ -99,7 +100,7 @@ pub fn animated_hotspots(controls: &[(Hotspot, Option<usize>)], pose: &[glam::Ma
 }
 
 /// The types built into the game, in the order the menu lists them.
-pub static BUILTIN: [&Spec; 9] = [&c172::SPEC, &dr400::SPEC, &b747::SPEC, &fa18::SPEC, &f4::SPEC, &f22::SPEC, &starship::SPEC, &concorde::SPEC, &sr71::SPEC];
+pub static BUILTIN: [&Spec; 10] = [&c172::SPEC, &dr400::SPEC, &b747::SPEC, &fa18::SPEC, &f4::SPEC, &f22::SPEC, &starship::SPEC, &concorde::SPEC, &sr71::SPEC, &g650::SPEC];
 
 /// Types added while the game runs: JSBSim aircraft the player downloaded
 /// (see hangar.rs), each flying with a stand-in from `BUILTIN` as its body.
@@ -728,16 +729,36 @@ mod hotspot_tests {
         }
     }
 
+    /// From the pilot's eye, every target is the first one its own ray
+    /// meets, and looking out ahead at the horizon meets none: the static
+    /// `Spec::hotspots` and the ones on moving pieces as they are posed (gear
+    /// down at idle, gear up at full power), as `hotspot_tests` resolves them.
     #[test]
     fn the_pilot_can_point_at_every_hotspot() {
+        let mut bad = Vec::new();
         for s in BUILTIN.iter() {
-            for (i, h) in s.hotspots.iter().enumerate() {
-                let d = (Vec3::from(h.at) - s.eye).normalize();
-                assert_eq!(pick(s.hotspots, s.eye, d), Some(i), "{}: hotspot {i} hidden behind another", s.name);
+            let model = (s.build)();
+            let controls = cockpit_controls(s, &model.pieces);
+            let mut plane = crate::plane::Plane::spawn(s, 0.6, -2.1, 1000.0, 0.0, 55.0);
+            for extended in [true, false] {
+                plane.gear_down = extended;
+                plane.throttle = if extended { 0.0 } else { 1.0 };
+                let targets = animated_hotspots(&controls, &plane.pose(&model.pieces));
+                for (i, h) in targets.iter().enumerate() {
+                    let d = (Vec3::from(h.at) - s.eye).normalize();
+                    let hit = pick(&targets, s.eye, d);
+                    if hit != Some(i) {
+                        let id = |h: &Hotspot| h.click.or(h.wheel.map(|w| w.0)).or(h.hold).unwrap_or("?");
+                        bad.push(format!("{}: {} (gear {}) hidden behind {:?}", s.name, id(h), if extended { "down" } else { "up" }, hit.map(|k| id(&targets[k]))));
+                    }
+                }
+                // Looking out ahead, at the horizon: nothing.
+                if let Some(k) = pick(&targets, s.eye, Vec3::new(0.0, 0.05, -1.0).normalize()) {
+                    bad.push(format!("{}: looking out ahead picks {:?}", s.name, targets[k]));
+                }
             }
-            // Looking out ahead, at the horizon: nothing.
-            assert_eq!(pick(s.hotspots, s.eye, Vec3::new(0.0, 0.05, -1.0).normalize()), None, "{}", s.name);
         }
+        assert!(bad.is_empty(), "\n{}", bad.join("\n"));
     }
 }
 

@@ -975,7 +975,11 @@ fn switches(b: &mut Builder) {
 }
 
 #[cfg(test)]
-pub const MOUSE_ACTIONS: &[&str] = &["prop_up", "prop_down", "cowl_open", "cowl_close", "brake_left", "brake_right", "nav_next", "nav_prev", "adf_next", "adf_prev", "landing_lights", "fuel_valve", "fuel_next", "fuel_prev"];
+pub const MOUSE_ACTIONS: &[&str] = &["prop_up", "prop_down", "cowl_open", "cowl_close", "brake_left", "brake_right", "nav_next", "nav_prev", "adf_next", "adf_prev", "landing_lights", "fuel_valve", "fuel_next", "fuel_prev",
+    // (an airliner's or business jet's autoflight panel: the G650's Guidance Panel)
+    "ap_vs", "ap_vs_up", "ap_vs_down", "ap_at", "ap_spd_up", "ap_spd_down",
+    // (a twin jet's L and R fuel control and battery switches: the G650's)
+    "fuel_control_l", "fuel_control_r", "battery_l", "battery_r"];
 
 pub fn action_label(id: &str) -> &str {
     match id {
@@ -985,7 +989,11 @@ pub fn action_label(id: &str) -> &str {
         "nav_next" => "Tune next NAV station", "nav_prev" => "Tune previous NAV station",
         "adf_next" => "Tune next ADF station", "adf_prev" => "Tune previous ADF station",
         "landing_lights" => "Landing lights", "fuel_valve" => "Fuel selector",
-        "fuel_next" => "Next fuel tank", "fuel_prev" => "Previous fuel tank", _ => id,
+        "fuel_next" => "Next fuel tank", "fuel_prev" => "Previous fuel tank",
+        "ap_vs" => "Autopilot: vertical speed mode", "ap_vs_up" => "Vertical speed up", "ap_vs_down" => "Vertical speed down",
+        "ap_at" => "Autothrottle on / off", "ap_spd_up" => "Speed target up", "ap_spd_down" => "Speed target down",
+        "fuel_control_l" => "L fuel control switch", "fuel_control_r" => "R fuel control switch",
+        "battery_l" => "L main battery", "battery_r" => "R main battery", _ => id,
     }
 }
 

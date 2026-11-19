@@ -197,6 +197,8 @@ fn window(p: vec3f) -> f32 {
   if (fighter()) { return -1.0; }
   // (Concorde's windscreen, side windows and visor are glass pieces of their own.)
   if (kind() == 6u) { return -1.0; }
+  // (So are the G650's windshield, side windows and cabin windows: its skin has the openings cut in it.)
+  if (kind() == 9u) { return -1.0; }
   let zy = vec2f(p.z, p.y);
   var d = sd_poly(zy, array<vec2f, 5>(vec2f(-1.72, 0.31), vec2f(-1.52, 0.07), vec2f(-1.03, 0.64), vec2f(-1.0, 0.80), vec2f(-1.75, 0.80)), 5) + 0.01;
   if (abs(p.x) > 0.3 && p.y < 0.6) {
@@ -212,6 +214,8 @@ fn window(p: vec3f) -> f32 {
 fn well(p: vec3f) -> f32 {
   if (kind() == 1u) { return well747(p); }
   if (kind() == 8u) { return 1.0; }
+  // (The G650's wells are cut into its exported skin.)
+  if (kind() == 9u) { return 1.0; }
   var d = 1.0;
   if (p.y < -0.40) {
     d = min(d, sd_poly(vec2f(p.z, p.x), quad(vec2f(-3.0, -0.135), vec2f(-1.915, -0.135), vec2f(-1.915, 0.135), vec2f(-3.0, 0.135)), 4) + 0.005);
@@ -1640,6 +1644,11 @@ const CONCORDE_NOZZLE = vec4f(4.755, 6.105, -1.82, 18.9);
 const CONCORDE_PLUME = 1.4;
 const CONCORDE_TUB = vec4f(1.36, -0.75, -25.3, -20.85);
 const CONCORDE_CABIN = array<f32, 5>(1.3, -0.75, 1.5, -25.3, -20.85);
+// The G650's flight deck (g650/mod.rs: the nose section's skin, FLOOR_Y, DECK_Z), likewise.
+const G650_TUB = vec4f(1.20, -0.36, -12.75, -9.95);
+const G650_CABIN = array<f32, 5>(1.15, -0.36, 1.55, -12.75, -9.95);
+// The middle of its HUD combiner's glass (g650/deck.rs HUD_C: EYE + (0, 0.005, -0.265)).
+const G650_HUD = vec3f(-0.52, 0.785, -11.615);
 // The nozzle a point belongs to: `nozzle()`, or of two engines a side the nearer one.
 fn nozzle_at(L: vec3f) -> vec3f {
   if (kind() == 6u) { return vec3f(select(CONCORDE_NOZZLE.x, CONCORDE_NOZZLE.y, abs(L.x) > 0.5 * (CONCORDE_NOZZLE.x + CONCORDE_NOZZLE.y)), CONCORDE_NOZZLE.zw); }
@@ -1918,6 +1927,8 @@ fn surface(in: VOut) -> Shaded {
         rough += PT.view.z * (sat(luma(paint.rgb) * 25.0) - 0.5);
         // (Concorde's is an airliner's gloss white, kept clean.)
         if (kind() == 6u) { rough = 0.16 + 0.08 * ns.g; }
+        // (The G650's: a business jet's deep gloss, polished.)
+        if (kind() == 9u) { rough = 0.12 + 0.06 * ns.g; }
       }
       // Each skin panel's paint aged a little differently.
       albedo *= 0.985 + 0.03 * fine.a * select(0.4, 1.0, id == 1u);
@@ -2123,8 +2134,8 @@ fn surface(in: VOut) -> Shaded {
         case 3u: { on = P5.y; k = mix(3.0, 3.5, night); }
         case 4u: { on = P5.z; k = mix(0.5, 1.2, night); }
         case 5u: { on = P5.w; k = mix(0.3, 2.0, night); }
-        case 6u: { on = step(0.999, P4.z) * select(1.0, G.cockpit[2].z, kind() == 0u); k = mix(0.05, 0.01, night); }
-        case 7u: { on = step(P4.z, 0.001) * select(1.0, G.cockpit[2].z, kind() == 0u); k = mix(0.05, 0.01, night); }
+        case 6u: { on = step(0.999, P4.z) * select(1.0, G.cockpit[2].z, kind() == 0u || kind() == 9u); k = mix(0.05, 0.01, night); }
+        case 7u: { on = step(P4.z, 0.001) * select(1.0, G.cockpit[2].z, kind() == 0u || kind() == 9u); k = mix(0.05, 0.01, night); }
         // Formation light strips: pale panels by day, a soft green glow with the navigation lights at night.
         case 9u: { on = step(999.0, P5.x); k = 0.012 * night; }
         default: { on = 1.0; k = 0.004; }
@@ -2271,7 +2282,13 @@ fn surface(in: VOut) -> Shaded {
       albedo = vec3f(0.01);
       rough = 0.05;
       let did = u32(in.mat.w + 0.5);
-      if (did >= 40u) {
+      if (did >= 60u) {
+        // The G650's PlaneView displays, SMCs, MCDUs and readouts (deck650.wgsl).
+        emit = display650(did, in.uv, duv) * G.sun_dir.w * mix(0.07, 0.01, night);
+        albedo = vec3f(0.010, 0.011, 0.013);
+        rough = 0.1;
+        ssr = 0.3;
+      } else if (did >= 40u) {
         // The Hornet's DDIs, AMPCD, UFC windows and IFEI (pit18.wgsl).
         emit = display18(did, in.uv, duv) * G.sun_dir.w * mix(0.06, 0.009, night);
         albedo = vec3f(0.010, 0.012, 0.012);
@@ -2376,6 +2393,7 @@ fn surface(in: VOut) -> Shaded {
   if (kind() == 3u) { inside = step(abs(L.x), F4_TUB.x) * step(F4_TUB.z, L.z) * step(L.z, F4_TUB.w) * step(F4_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   if (kind() == 4u) { inside = step(abs(L.x), F22_TUB.x) * step(F22_TUB.z, L.z) * step(L.z, F22_TUB.w) * step(F22_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   if (kind() == 6u) { inside = step(abs(L.x), CONCORDE_TUB.x) * step(CONCORDE_TUB.z, L.z) * step(L.z, CONCORDE_TUB.w) * step(CONCORDE_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
+  if (kind() == 9u) { inside = step(abs(L.x), G650_TUB.x) * step(G650_TUB.z, L.z) * step(L.z, G650_TUB.w) * step(G650_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   if (kind() == 8u) { inside = step(abs(L.x), 0.56) * step(-0.62, L.z) * step(L.z, 1.66) * step(L.y, 0.62) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE && pt != P_COWL); }
   if (kind() == 7u) { inside = step(abs(L.x), SR71_TUB.x) * step(SR71_TUB.z, L.z) * step(L.z, SR71_TUB.w) * step(SR71_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   // (a downloaded aircraft has no cabin of ours where its own model is)
@@ -2704,6 +2722,8 @@ fn tex_glass(in: VOut) -> vec4f {
   // The Hornet's HUD combiner: the symbology, focused at infinity. (The
   // combiner's top is at 1.045; the canopy passes over it from 1.13 up.)
   if (kind() == 2u && in.L.y > 0.86 && in.L.y < 1.06 && abs(in.L.x) < 0.1 && in.L.z > -5.3 && in.L.z < -5.15) { return hud18(in, px); }
+  // The G650's HUD II combiner (g650/deck.rs HUD_C, HUD_HALF; deck650.wgsl).
+  if (kind() == 9u && abs(in.L.x - G650_HUD.x) < 0.095 && abs(in.L.y - G650_HUD.y) < 0.08 && abs(in.L.z - G650_HUD.z) < 0.03) { return hud650(in, px); }
   let d = window(in.L);
   let cov = 1.0 - smoothstep(-px, px, d);
   if (cov <= 0.0) { discard; }
@@ -2719,6 +2739,7 @@ fn tex_glass(in: VOut) -> vec4f {
   if (kind() == 3u) { in_cabin = from_inside && abs(eye_l.x) < F4_CABIN[0] && eye_l.y > F4_CABIN[1] && eye_l.y < F4_CABIN[2] && eye_l.z > F4_CABIN[3] && eye_l.z < F4_CABIN[4]; }
   if (kind() == 4u) { in_cabin = from_inside && abs(eye_l.x) < F22_CABIN[0] && eye_l.y > F22_CABIN[1] && eye_l.y < F22_CABIN[2] && eye_l.z > F22_CABIN[3] && eye_l.z < F22_CABIN[4]; }
   if (kind() == 6u) { in_cabin = from_inside && abs(eye_l.x) < CONCORDE_CABIN[0] && eye_l.y > CONCORDE_CABIN[1] && eye_l.y < CONCORDE_CABIN[2] && eye_l.z > CONCORDE_CABIN[3] && eye_l.z < CONCORDE_CABIN[4]; }
+  if (kind() == 9u) { in_cabin = from_inside && abs(eye_l.x) < G650_CABIN[0] && eye_l.y > G650_CABIN[1] && eye_l.y < G650_CABIN[2] && eye_l.z > G650_CABIN[3] && eye_l.z < G650_CABIN[4]; }
   if (kind() == 8u) { in_cabin = from_inside && abs(eye_l.x) < 0.56 && eye_l.y > -0.52 && eye_l.y < 0.62 && eye_l.z > -0.62 && eye_l.z < 1.66; }
   if (kind() == 7u) { in_cabin = from_inside && abs(eye_l.x) < SR71_CABIN[0] && eye_l.y > SR71_CABIN[1] && eye_l.y < SR71_CABIN[2] && eye_l.z > SR71_CABIN[3] && eye_l.z < SR71_CABIN[4]; }
   let wind = abs(in.Nl.x) < 0.5;
@@ -2769,7 +2790,7 @@ fn tex_glass(in: VOut) -> vec4f {
       haze += spots * 0.05;
     }
   }
-  let bugs = smoothstep(0.86, 0.9, nz(L * 12.0).a) * step(L.z, -1.25) * smoothstep(0.55, 0.2, L.y) * select(1.0, 0.0, kind() == 1u || kind() == 6u) * (1.0 - smoothstep(0.002, 0.008, px));
+  let bugs = smoothstep(0.86, 0.9, nz(L * 12.0).a) * step(L.z, -1.25) * smoothstep(0.55, 0.2, L.y) * select(1.0, 0.0, kind() == 1u || kind() == 6u || kind() == 9u) * (1.0 - smoothstep(0.002, 0.008, px));
   let toward = pow(max(dot(V, Ls), 0.0), 6.0);
   let lit = l.sun * sh * (0.15 + 2.5 * toward) + l.amb * 0.6;
   var rgb = env * F + glint + haze * lit * 0.35 + vec3f(0.05, 0.04, 0.02) * bugs * (l.amb + l.sun * sh * 0.2);
@@ -2858,11 +2879,11 @@ fn tex_glass(in: VOut) -> vec4f {
     // (The Raptor's coated one: amber.)
     if (kind() == 4u) { tint = vec3f(0.96, 0.91, 0.78); }
     // (Concorde's is laminated and heated like the 747's.)
-    if (kind() == 6u) { tint = vec3f(0.93, 0.965, 0.955); }
+    if (kind() == 6u || kind() == 9u) { tint = vec3f(0.93, 0.965, 0.955); }
     let edge = 1.0 - smoothstep(0.0, 0.08, -d);
     let curve = select(0.0, smoothstep(0.12, 0.45, abs(in.Nl.x)), wind);
     // (The 747's laminated glass is far flatter than formed acrylic: a faint waviness only.)
-    let bend = select(glass_bend(g2, edge, curve), glass_bend(g2 * 0.6, 0.0, 0.0) * 0.18, kind() == 1u || kind() == 6u);
+    let bend = select(glass_bend(g2, edge, curve), glass_bend(g2 * 0.6, 0.0, 0.0) * 0.18, kind() == 1u || kind() == 6u || kind() == 9u);
     let dw = (O.model * vec4f(tb * bend.x + bb * bend.y, 0.0)).xyz;
     var seen = textureLoad(t_scene, vec2i(in.clip.xy), 0).rgb;
     let cp = G.view_proj * vec4f(V + dw, 0.0);

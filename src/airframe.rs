@@ -606,6 +606,10 @@ pub enum Input {
     /// the parking brake (0 off, 1 set)
     Master,
     Ignition,
+    /// one of a pair of L/R switches on the shared fuel control or battery
+    /// master (0 left, 1 right): 1 while that switch is on (`Plane::pair_off`)
+    FuelControl(u8),
+    Battery(u8),
     Mixture,
     ParkingBrake,
     Brake(f32),
@@ -619,6 +623,8 @@ pub enum Input {
     Mach,
     /// a sliding canopy, 0 shut .. 1 fully open
     Canopy,
+    /// the speed brake handle, 0 stowed .. 1 (`Plane::speedbrake`; the spoilers follow it in flight)
+    Speedbrake,
 }
 
 /// How an input is shaped before it moves a piece.

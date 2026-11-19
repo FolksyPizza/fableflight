@@ -141,6 +141,12 @@ pub struct Plane {
     pub parking_brake: bool,
     pub toe_brake: [f64; 2],
     pub landing_lights: bool,
+    /// A two-engine jet's L and R fuel control switches ([0]) and battery
+    /// switches ([1]) work the one shared `ignition` / `sys.elec.master`:
+    /// the shared state is on while either switch of its pair is. True: that
+    /// switch is off while its partner holds the state on. (All false, both
+    /// show the shared state; keys and other controls set both together.)
+    pub pair_off: [[bool; 2]; 2],
     pub fuel_selector: FuelSelector,
     pub engine_hours: f64,
     pub propeller: f64,
@@ -320,6 +326,7 @@ impl Plane {
             parking_brake: false,
             toe_brake: [0.0; 2],
             landing_lights: true,
+            pair_off: [[false; 2]; 2],
             fuel_selector: FuelSelector::Center,
             engine_hours: 1834.6,
             propeller: 1.0,
@@ -635,6 +642,15 @@ impl Plane {
         self.settle_engine(v, h);
     }
 
+    /// Whether switch `k` (0 L, 1 R) of a pair on a shared state is on: `w` 0
+    /// the fuel controls (`ignition`), 1 the batteries (`sys.elec.master`).
+    /// See `pair_off`; both marked off cannot hold the state on, so both show it.
+    pub fn pair_on(&self, w: usize, k: usize) -> bool {
+        let on = if w == 0 { self.ignition } else { self.sys.elec.master };
+        let off = self.pair_off[w];
+        on && !(off[k] && !off[1 - k])
+    }
+
     /// The value an animation input has this instant (see airframe::Input).
     fn input(&self, i: Input) -> f32 {
         let s = self.stick.as_vec3();
@@ -661,6 +677,8 @@ impl Plane {
             Input::Trim => self.trim as f32,
             Input::Master => self.sys.elec.master as u8 as f32,
             Input::Ignition => if self.starter_on || self.cranking { 1.5 } else if self.ignition { 1.0 } else { 0.0 },
+            Input::FuelControl(k) => self.pair_on(0, k as usize) as u8 as f32,
+            Input::Battery(k) => self.pair_on(1, k as usize) as u8 as f32,
             Input::Mixture => self.mixture as f32,
             Input::ParkingBrake => self.parking_brake as u8 as f32,
             Input::Brake(side) => self.toe_brake[if side < 0.0 { 0 } else { 1 }] as f32,
@@ -671,6 +689,7 @@ impl Plane {
             Input::Reverser => self.reverser as f32,
             Input::Mach => self.mach() as f32,
             Input::Canopy => self.canopy as f32,
+            Input::Speedbrake => self.speedbrake as f32,
         }
     }
 
@@ -4694,7 +4713,7 @@ mod tests {
     #[test]
     fn a_747_settles_on_its_gear() {
         let w = flat_world();
-        for (spec, wind) in [(C172, 0.0), (B747, 0.0), (DR400, 0.0), (C172, 6.0), (B747, 6.0), (DR400, 6.0)] {
+        for (spec, wind) in [(C172, 0.0), (B747, 0.0), (DR400, 0.0), (C172, 6.0), (B747, 6.0), (DR400, 6.0), (G650, 0.0), (G650, 6.0)] {
             let mut p = Plane::spawn_ground(spec, 37.6, -122.37, 0.0, 0.5, 0.0);
             // A tailwind, parked: no airflow worth the name over the wing.
             p.wind = p.forward() * wind;
@@ -4734,5 +4753,240 @@ mod tests {
         assert!(touched);
         assert!(p.vel.length() < 3.0, "{}", p.vel.length());
         assert!(p.dmg.gear.iter().all(|g| *g));
+    }
+
+    // ---------------------------------------------------------------- the Gulfstream G650
+    // Targets and their sources are in aircraft/g650/mod.rs ("The flight model").
+
+    const G650: &Spec = &crate::aircraft::g650::SPEC;
+    /// G650 weights (kg): maximum take-off and landing weight (TCDS).
+    const G650_MTOW: f64 = 45_177.0;
+    const G650_MLW: f64 = 37_874.0;
+
+    /// The fuel that makes a G650 (with its usual payload) weigh `kg`.
+    fn g650_fuel_for(kg: f64) -> f64 {
+        let fuel = kg - G650.mass + 0.5 * G650.fuel_kg;
+        assert!(fuel >= 0.0 && fuel <= G650.fuel_kg, "{kg} kg needs {fuel} kg of fuel");
+        fuel
+    }
+
+    /// Its 1 g stall (m/s, sea level) at `kg` with the flaps at `flaps` (fraction of full travel).
+    fn g650_vs(kg: f64, flaps: f64) -> f64 {
+        let s = G650;
+        let cl = s.cl0 + s.flap_cl * flaps + s.cl_a * (s.stall_alpha - s.stall_flap * flaps);
+        (2.0 * kg * 9.81 / (RHO0 * s.wing_area * cl)).sqrt()
+    }
+
+    #[test]
+    fn performance_is_a_g650() {
+        let w = empty_world();
+        let s = G650;
+        let fe = match &s.engine {
+            Engine::Fan(f) => f,
+            _ => unreachable!(),
+        };
+        // Cruise at FL450, Mach 0.85 (its long-range cruise), at 35.3 t: N1 in the high 80s.
+        let h = 13_716.0;
+        let v = 0.85 * sound_speed(h);
+        let mut p = Plane::spawn(s, 0.6, -2.1, h, 0.0, v);
+        println!("cruise trim: alpha {:.1} deg, throttle {:.2}, N1 {:.0}%", p.trim.to_degrees(), p.throttle, p.n1 * 100.0);
+        assert!(p.trim.to_degrees() > 1.5 && p.trim.to_degrees() < 4.5, "{}", p.trim.to_degrees());
+        assert!(p.n1 > 0.80 && p.n1 < 0.96, "{}", p.n1);
+        let thr = p.throttle;
+        let (va, vs) = fly(&mut p, &w, 120.0, thr, hold_alt(h));
+        let burn = p.fuel_flow;
+        let range = s.fuel_kg / burn * va / 1852.0;
+        println!("cruise: M {:.3}, {:.0} kt true, vs {vs:.1} m/s, {:.0} kg/h ({:.0} lb/h); all its fuel at that rate: {range:.0} nmi", va / sound_speed(h), va * KT, burn * 3600.0, burn * 3600.0 * 2.2046);
+        assert!((va / sound_speed(h) - 0.85).abs() < 0.03 && p.notes.is_empty(), "{} {:?}", va / sound_speed(h), p.notes);
+        // (some 1,250-1,450 kg/h at this weight; 480 US gal/h, 1,460 kg/h, on average)
+        assert!(burn * 3600.0 > 1_100.0 && burn * 3600.0 < 1_550.0, "{}", burn * 3600.0);
+        // (7,000 nmi at Mach 0.85 with eight passengers, after the climb and with reserves left)
+        assert!(range > 6_500.0 && range < 9_000.0, "{range}");
+        // Its high-speed cruise, Mach 0.90, burns more for the same weight and height.
+        let mut p = Plane::spawn(s, 0.6, -2.1, h, 0.0, 0.90 * sound_speed(h));
+        let thr = p.throttle;
+        let (va90, _) = fly(&mut p, &w, 60.0, thr, hold_alt(h));
+        let ratio = p.fuel_flow / burn;
+        println!("high-speed cruise: M {:.3}, {:.0} kg/h, {ratio:.2} times the long-range cruise's", va90 / sound_speed(h), p.fuel_flow * 3600.0);
+        assert!((va90 / sound_speed(h) - 0.90).abs() < 0.03 && ratio > 1.03 && ratio < 1.35, "{ratio}");
+
+        // Flat out at FL410: up to its MMO of 0.925 (its maximum cruise), and
+        // held back there by the drag rise, short of where it would flutter.
+        let h = 12_497.0;
+        let mut p = Plane::spawn(s, 0.6, -2.1, h, 0.0, 0.85 * sound_speed(h));
+        let (vm, _) = fly(&mut p, &w, 300.0, 1.0, hold_alt(h));
+        let top = top_mach(s, h, false, 0.5);
+        println!("flat out at FL410: M {:.3} after 300 s, M {top:.3} where thrust meets drag; notes {:?}", vm / sound_speed(h), p.notes);
+        assert!(vm / sound_speed(h) > 0.915 && vm / sound_speed(h) < 0.97 && p.notes.is_empty(), "{}", vm / sound_speed(h));
+        assert!(top > 0.915 && top < 0.97, "{top}");
+
+        // How high it goes: the climb left at full thrust, Mach 0.85 (m/s).
+        let climb = |kg: f64, alt: f64| {
+            let mut p = Plane::spawn(s, 0.6, -2.1, alt, 0.0, 200.0);
+            p.fuel = g650_fuel_for(kg);
+            let v = 0.85 * sound_speed(alt);
+            (p.thrust(1.0, v, alt) - p.drag_level(v, alt, 0.0, 0.0)) * v / (kg * 9.81)
+        };
+        // Straight to FL410 at its maximum weight, less what the climb burns
+        // (its initial cruise altitude, Aviation Week), up to its 51,000 ft
+        // ceiling once light, but not at FL510 heavy.
+        let (c410, c510, c510_full) = (climb(44_000.0, 12_497.0), climb(33_000.0, 15_545.0), climb(G650_MTOW, 15_545.0));
+        println!("climb left at M0.85: {:.0} fpm at FL410 at 44 t, {:.0} fpm at FL510 at 33 t, {:.0} fpm at FL510 at MTOW", c410 * 196.85, c510 * 196.85, c510_full * 196.85);
+        assert!(c410 * 196.85 > 300.0 && c510 * 196.85 > 100.0 && c510_full < 0.0, "{c410} {c510} {c510_full}");
+
+        // Stall at the maximum landing weight: about 109 kt at flaps 39 (Vref
+        // 134), 123 clean; at 65,500 lb its Vref is 120 kt (a flight evaluation).
+        let (full, clean, vref_light) = (g650_vs(G650_MLW, 1.0) * KT, g650_vs(G650_MLW, 0.0) * KT, 1.23 * g650_vs(29_710.0, 1.0) * KT);
+        println!("stall at MLW: {full:.0} kt flaps 39, {clean:.0} kt clean; Vref at 65,500 lb {vref_light:.0} kt; V2 at MTOW, flaps 20: {:.0} kt", 1.13 * g650_vs(G650_MTOW, 20.0 / 39.0) * KT);
+        assert!(full > 104.0 && full < 114.0 && clean > 115.0 && clean < 130.0, "{full} {clean}");
+        assert!(vref_light > 115.0 && vref_light < 125.0, "{vref_light}");
+
+        // A third of its maximum weight in static thrust; the ICAO fuel flows (two engines).
+        let t0 = Plane::fan_thrust(fe, 1.0, 0.0, 0.0);
+        println!("static thrust {:.1} kN = {:.3} of MTOW; fuel flows {:?} kg/s", t0 / 1000.0, t0 / (G650_MTOW * 9.81), s.fuel_flow);
+        assert!(t0 / (G650_MTOW * 9.81) > 0.33 && t0 / (G650_MTOW * 9.81) < 0.35);
+        assert!(s.fuel_flow[0] > 0.15 && s.fuel_flow[0] < 0.20 && s.fuel_flow[1] > 1.5 && s.fuel_flow[1] < 1.65);
+
+        // Go-around thrust: from flight idle to 90% of full thrust in 4-8 s (CS 25.119 allows 8).
+        let (h, v) = (300.0, 70.0);
+        let mut p = Plane::spawn(s, 0.6, -2.1, h, 0.0, v);
+        p.throttle = 0.0;
+        p.settle_engine(v, h);
+        let dt = 1.0 / 120.0;
+        let mut t = 0.0;
+        while p.power * fe.n as f64 * fe.thrust < 0.9 * p.thrust(1.0, p.airspeed().length(), h) && t < 20.0 {
+            assert!(p.step(dt, &Controls { throttle_set: Some(1.0), ..Default::default() }, &w).is_none());
+            t += dt;
+        }
+        println!("idle to 90% thrust: {t:.1} s");
+        assert!(t > 4.0 && t < 8.0, "{t}");
+
+        // Full aileron at 250 kt: a business jet's roll rate, not an airliner's.
+        let mut p = Plane::spawn(s, 0.6, -2.1, 1500.0, 0.0, 250.0 / KT * (RHO0 / density(1500.0)).sqrt());
+        let mut best: f64 = 0.0;
+        for _ in 0..(4.0 / dt) as usize {
+            assert!(p.step(dt, &Controls { roll: 1.0, ..Default::default() }, &w).is_none());
+            best = best.max(p.omega.z.abs());
+        }
+        println!("roll rate at 250 kt: {:.0} deg/s", best.to_degrees());
+        assert!(best.to_degrees() > 15.0 && best.to_degrees() < 35.0, "{}", best.to_degrees());
+    }
+
+    #[test]
+    fn a_g650_takes_off_and_climbs() {
+        let w = flat_world();
+        let s = G650;
+        // At its maximum take-off weight, flaps 20 (its usual setting), full thrust.
+        let mut p = Plane::spawn_ground(s, 37.6, -122.37, 0.0, 0.5, 0.0);
+        p.hold = false;
+        p.t = 2.0;
+        p.fuel = g650_fuel_for(G650_MTOW);
+        p.flap_set = 2;
+        p.flaps = s.flap_frac(2);
+        let dt = 1.0 / 120.0;
+        let (mut lifted, mut t) = (None, 0.0);
+        let start = p.pos;
+        let (mut want, mut last, mut most): (f64, f64, f64) = (0.0, 0.0, 0.0);
+        let (mut want_climb, mut last_ias) = (12.0f64, 0.0f64);
+        let mut fl410 = None;
+        let pitch_of = |p: &Plane| p.forward().dot(p.pos.normalize()).asin().to_degrees();
+        while t < 2400.0 && fl410.is_none() {
+            let v = p.vel.length();
+            let pitch_deg = pitch_of(&p);
+            let rate = (pitch_deg - last) / dt;
+            last = pitch_deg;
+            let (_, _, hh) = geo::pos_to_lla(p.pos);
+            let ias = p.ias() * KT;
+            if p.on_ground {
+                most = most.max(pitch_deg);
+            }
+            // Rotate at 138 kt, 2.5 degrees a second (pulling firmly: the aim leads the nose by 3), to 10 until the tail is
+            // clear, then on to 15; once climbing away, fly the speed: 250 kt
+            // below 10,000 ft, then 300 kt to Mach 0.80, then Mach 0.80.
+            if lifted.is_some() && hh > 300.0 {
+                let target = if hh < 3048.0 { 250.0 } else if p.mach() < 0.80 { 300.0 } else { ias * 0.80 / p.mach() };
+                let accel = (ias - last_ias) / dt;
+                want_climb = (want_climb + ((ias - target) * 0.04 + accel * 0.6) * dt).clamp(1.0, 18.0);
+                want = want_climb;
+            } else if v * KT > 138.0 {
+                want = (want.max(pitch_deg + 3.0) + 2.5 * dt).min(if hh > p.wheel_height() + 6.0 { 15.0 } else { 10.0 });
+                want_climb = want;
+            }
+            last_ias = ias;
+            // Flaps up at 180 kt, out of VFE's way.
+            if ias > 180.0 && lifted.is_some() {
+                p.flap_set = 0;
+            }
+            let pitch = if v * KT > 138.0 { ((want - pitch_deg) * 0.25 - rate * 0.08).clamp(-1.0, 1.0) } else { 0.0 };
+            let roll_err = -p.right().dot(p.pos.normalize());
+            let c = Controls { throttle: 1.0, pitch, roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), ..Default::default() };
+            assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
+            if lifted.is_none() && !p.on_ground && t > 5.0 {
+                lifted = Some(((p.pos - start).length(), v, t));
+                p.toggle_gear();
+            }
+            if hh > 12_497.0 {
+                fl410 = Some(t);
+            }
+            t += dt;
+        }
+        let (dist, vlo, tlo) = lifted.expect("it never left the ground");
+        println!("take-off at {:.0} t: off after {dist:.0} m and {tlo:.0} s at {:.0} kt, at most {most:.1} deg nose up on the runway", G650_MTOW / 1000.0, vlo * KT);
+        // (5,858 ft, 1,786 m, of balanced field at MTOW, sea level, ISA, flaps 20: an
+        // engine-out figure; with both, the wheels leave well before that)
+        assert!(dist > 900.0 && dist < 1600.0, "{dist}");
+        assert!(vlo * KT > 130.0 && vlo * KT < 155.0, "{}", vlo * KT);
+        // (the tail cone meets the runway at about 16 degrees)
+        assert!(most < 14.0, "{most}");
+        let up = fl410.expect("it never reached FL410");
+        println!("FL410 after {:.1} min, burning {:.0} kg on the way; M {:.2}, {:.0} kg/h", up / 60.0, g650_fuel_for(G650_MTOW) - p.fuel, p.mach(), p.fuel_flow * 3600.0);
+        // (to its cruise altitude in as little as 22 minutes, BJT)
+        assert!(up > 15.0 * 60.0 && up < 30.0 * 60.0, "{}", up / 60.0);
+        assert!(p.notes.is_empty() && p.dmg.gear.iter().all(|g| *g), "{:?}", p.notes);
+    }
+
+    #[test]
+    fn a_g650_approaches_and_lands() {
+        let w = flat_world();
+        let s = G650;
+        let vref = 1.23 * g650_vs(G650_MLW, 1.0);
+        // On a 3 degree glide at its maximum landing weight, gear down, flaps 39, Vref + 5 kt.
+        let v = vref + 5.0 / KT;
+        let mut p = Plane::spawn(s, 0.6, -2.1, 600.0, 0.0, v);
+        p.fuel = g650_fuel_for(G650_MLW);
+        let sink = v * 3f64.to_radians().sin();
+        p.configure(3, true, sink);
+        let thr = p.throttle;
+        let (va, vs) = fly(&mut p, &w, 60.0, thr, |_| 0.0);
+        let ld = p.mass() * 9.81 / p.drag_level(va, 600.0, p.flaps, 1.0);
+        let pitch = p.forward().dot(p.pos.normalize()).asin().to_degrees();
+        println!("approach at {:.1} t: {:.0} kt (Vref {:.0}), {:.0} fpm, alpha {:.1} deg, pitch {pitch:.1} deg, N1 {:.0}%, lift over drag {ld:.1}", p.mass() / 1000.0, va * KT, vref * KT, vs * 196.85, p.alpha.to_degrees(), p.n1 * 100.0);
+        assert!((va - v).abs() < 3.0 && (vs + sink).abs() < 1.0, "{va} {vs}");
+        assert!(p.alpha.to_degrees() > 3.0 && p.alpha.to_degrees() < 9.0 && !p.stalled && p.notes.is_empty());
+        assert!(p.n1 > 0.45 && p.n1 < 0.75 && ld > 5.5 && ld < 9.0, "{} {ld}", p.n1);
+
+        // Over the threshold at 50 ft and Vref, then down: spoilers, brakes and reversers.
+        let mut p = Plane::spawn(s, 37.6, -122.37, 15.24, 0.5, vref);
+        p.t = 2.0;
+        p.fuel = g650_fuel_for(G650_MLW);
+        p.configure(3, true, vref * 3f64.to_radians().sin());
+        let dt = 1.0 / 120.0;
+        let start = p.pos;
+        let (mut t, mut down) = (0.0, None);
+        while t < 60.0 {
+            let touched = down.is_some();
+            let c = Controls { throttle: -1.0, brake: touched, reverse: touched, pitch: if touched { -0.1 } else { 0.08 }, ..Default::default() };
+            assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
+            if down.is_none() && p.on_ground {
+                down = Some(p.pos);
+            }
+            t += dt;
+        }
+        let down = down.expect("it never touched down");
+        let (air, roll) = ((down - start).length(), (p.pos - down).length());
+        println!("landing at {:.1} t from 50 ft at {:.0} kt: {air:.0} m to touch down, {roll:.0} m on the runway; {:.1} m/s after 60 s, spoilers {:.2}, reversers {:.2}, notes {:?}", p.mass() / 1000.0, vref * KT, p.vel.length(), p.spoilers, p.reverser, p.notes);
+        // (2,680 ft, 817 m, from 50 ft at MLW, sea level, ISA)
+        assert!(p.vel.length() < 1.0 && roll < 1_000.0 && air + roll < 1_300.0, "{} {air} {roll}", p.vel.length());
+        assert!(p.notes.is_empty() && p.dmg.gear.iter().all(|g| *g), "{:?}", p.notes);
     }
 }

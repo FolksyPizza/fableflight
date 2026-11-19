@@ -102,7 +102,14 @@ struct Globals {
   // (+ fly right), glide slope needle -1..1 (+ fly up), OBS (deg), flags (1
   // alive, 2 TO, 4 FROM, 8 glide slope alive).
   nav: vec4f,
-  cockpit: array<vec4f, 8>,
+  // Rows 0-7: the Cessna's instruments, radios and navigation plot (main.rs
+  // cockpit_globals). Rows 8-11, for the glass cockpits (deck650.wgsl): the
+  // autopilot (mode bits, heading bug deg, preselected altitude ft, speed kt;
+  // V/S target fpm, trim deg, speedbrake lever, spoilers 0..1); reversers,
+  // flags (1 running, 2 starter, 4 fuel on, 8 bus powered, 16 on the ground,
+  // 32 park brake), toe brakes 0..1, angle of attack / stall angle; battery
+  // volts and amps, cabin altitude ft, airspeed trend (kt in 6 s).
+  cockpit: array<vec4f, 12>,
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
