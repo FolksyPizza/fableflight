@@ -35,8 +35,9 @@ impl Game {
         let mut press: Option<Tile> = None;
         let mut quit = false;
         let again = self.last_start_label();
-        let saved = self.saved_flight.as_ref().map(|flight| flight.aircraft_name().to_string());
-        let resume = saved.as_deref().map(|plane| (t!("Saved checkpoint", "Point de reprise"), plane));
+        let saved: Vec<_> = self.saved_flights.iter().enumerate()
+            .filter_map(|(slot, save)| Some((slot, save.as_ref()?.label()))).collect();
+        let resume = saved.first().map(|(_, plane)| (t!("Saved checkpoint", "Point de reprise"), plane.as_str()));
         egui::Area::new(egui::Id::unique("main_menu")).order(egui::Order::Background).fixed_pos(screen.min).show(ctx, |ui| {
             let p = ui.painter().clone();
             // Darken space towards the foot of the screen, for depth.
@@ -119,13 +120,34 @@ impl Game {
             Some(Tile::Fly) => self.menu.screen = Screen::Fly,
             Some(Tile::Aircraft) => self.open_aircraft(hangar_ui::Tab::Mine, Screen::Main),
             Some(Tile::Settings) => self.menu.screen = Screen::Settings,
-            Some(Tile::SavedFlight) => self.resume_saved_flight(),
+            Some(Tile::SavedFlight) if saved.len() == 1 => self.resume_saved_flight(saved[0].0),
+            Some(Tile::SavedFlight) => self.show_saved_flights = true,
             Some(Tile::Again) => {
                 self.restore_last_start();
                 self.menu.screen = Screen::Fly;
                 self.begin();
             }
             None => {}
+        }
+        if self.show_saved_flights {
+            let mut selected = None;
+            egui::Window::new(t!("Saved flights", "Vols enregistrés"))
+                .id(egui::Id::unique("flight_checkpoints"))
+                .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .open(&mut self.show_saved_flights)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    for (slot, label) in &saved {
+                        if ui.button(t!("Slot {} · {}", "Emplacement {} · {}", slot + 1, label)).clicked() {
+                            selected = Some(*slot);
+                        }
+                    }
+                });
+            if let Some(slot) = selected {
+                self.show_saved_flights = false;
+                self.resume_saved_flight(slot);
+            }
         }
         if press.is_some() {
             self.pad_home = true;

@@ -86,6 +86,10 @@ impl Game {
             self.ap.alt = target;
         }
         if !self.ap.on { self.ap_toggle(); }
+        if self.ap.on && self.plane.running && self.throttle_axis.is_none() {
+            self.ap.at = true;
+            self.ap.spd = s.ias.max(self.plane.spec.approach.0 * 1.18);
+        }
         self.flight_plan.follow = self.ap.on;
         self.flight_plan.message = Some(t!("Cruise target {:.0} ft MSL", "Altitude de croisière {:.0} ft AMSL", target * 3.28084));
     }

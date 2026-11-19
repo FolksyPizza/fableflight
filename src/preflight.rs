@@ -1,6 +1,6 @@
 //! Interactive handoff from the departure camera to the aircraft.
 use crate::{Game, Loading, Plane, cars, flightui, menu, padui::Hint, render::Inst, t};
-use glam::{DVec3, Mat4, Vec3};
+use glam::{DQuat, DVec3, Mat4, Vec3};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
@@ -38,6 +38,20 @@ pub fn walkaround_camera(plane: &Plane, step: u8, blend: f64) -> (DVec3, DVec3, 
     (eye, (target - eye).normalize(), up)
 }
 
+pub fn airborne_camera(plane: &Plane, elapsed: f64) -> (DVec3, DVec3, DVec3) {
+    let up = plane.pos.normalize();
+    let back = (-plane.forward() + up * plane.forward().dot(up)).normalize_or_zero();
+    let back = if back == DVec3::ZERO { crate::geo::enu(plane.pos).1 } else { back };
+    let scale = plane.spec.cam_dist.max(f64::from(plane.spec.span) * 0.94);
+    // Start behind the wing, drift to the other side, then circle back.
+    let angle = (28.0 + 112.0 * Loading::ease((elapsed - 2.2) / 5.5)
+        - 166.0 * Loading::ease((elapsed - 9.0) / 7.5)
+        + 54.0 * Loading::ease((elapsed - 19.0) / 6.0)).to_radians();
+    let rise = 0.15 + 0.09 * Loading::ease((elapsed - 2.0) / 7.0);
+    let offset = DQuat::from_axis_angle(up, angle) * back * scale + up * (scale * rise);
+    (plane.centre() + offset, -offset.normalize(), up)
+}
+
 pub fn equipment(plane: &Plane, cam: DVec3, step: u8, out: &mut Vec<(u32, Inst)>) {
     let mut block = |position: DVec3, half: Vec3, rgb: [f32; 3]| {
         let m = Mat4::from_scale_rotation_translation(half, plane.rot.as_quat(), (position - cam).as_vec3());
@@ -72,6 +86,10 @@ impl Game {
 
     pub(crate) fn advance_preflight(&mut self) {
         let Some(stage) = self.preflight else { return };
+        if stage == Stage::Airborne && !self.preflight_cockpit && self.cam_mode == 0 {
+            let (eye, _, _) = airborne_camera(&self.plane, self.real - self.preflight_step_since);
+            self.briefing_exit = Some((eye - self.plane.centre(), self.real));
+        }
         self.preflight = stage.next();
         self.preflight_step_since = self.real;
         self.keys.clear();
@@ -93,21 +111,24 @@ impl Game {
         let raw = self.egui_input();
         let mut advance = false;
         let mut back = false;
-        let mut change_view = false;
         let ctx = self.egui_ctx.clone();
         let out = ctx.run_ui(raw, |root| {
             let ctx = root.ctx();
             let width = (ctx.content_rect().width() - 64.0).clamp(150.0, 326.0);
-            egui::Area::new(egui::Id::unique("preflight_back"))
-                .anchor(Align2::LEFT_TOP, [ screen_margin(width), 18.0 ])
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        if ui.button(t!("Return to planner", "Retour au planificateur")).clicked() { back = true; }
-                        if stage == Stage::Airborne {
-                            let view = if self.preflight_cockpit { t!("External view", "Vue extérieure") } else { t!("Cockpit view", "Vue du cockpit") };
-                            change_view = ui.button(view).clicked();
-                        }
+            if let Stage::Airborne = stage {
+                egui::Area::new(egui::Id::unique("start_airborne"))
+                    .anchor(Align2::RIGHT_BOTTOM, [-screen_margin(width), -24.0])
+                    .show(ctx, |ui| {
+                        ui.set_width(198.0);
+                        advance = menu::wide_button(ui, t!("Start flight", "Commencer le vol"), Hint::None, true, true).clicked();
                     });
+                if self.google_shown() { self.credits(ctx); }
+                return;
+            }
+            egui::Area::new(egui::Id::unique("preflight_back"))
+                .anchor(Align2::LEFT_TOP, [screen_margin(width), 18.0])
+                .show(ctx, |ui| {
+                    back = ui.button(t!("Return to planner", "Retour au planificateur")).clicked();
                 });
             egui::Area::new(egui::Id::unique("departure_briefing"))
                 .anchor(Align2::RIGHT_BOTTOM, [-screen_margin(width), -20.0])
@@ -115,7 +136,7 @@ impl Game {
                     flightui::tools_frame().inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
                         ui.set_width(width);
                         let (title, action) = match stage {
-                            Stage::Airborne => (t!("Ready to fly", "Prêt à voler"), t!("Start flight", "Commencer le vol")),
+                            Stage::Airborne => unreachable!("airborne briefing uses a single button"),
                             Stage::Walkaround(0) => (t!("Exterior check", "Inspection extérieure"), t!("Remove protective cover", "Retirer la protection")),
                             Stage::Walkaround(1) => (t!("Exterior check", "Inspection extérieure"), t!("Remove wheel chocks", "Retirer les cales")),
                             Stage::Walkaround(2) => (t!("Exterior check", "Inspection extérieure"), t!("Check flight surfaces", "Vérifier les gouvernes")),
@@ -140,8 +161,6 @@ impl Game {
             self.to_globe();
         } else if advance {
             self.advance_preflight();
-        } else if change_view {
-            self.toggle_briefing_view();
         }
         let opacity = Loading::ease((self.real - self.flight_ui_since) / 0.28) as f32;
         let mut jobs = ctx.tessellate(out.shapes, out.pixels_per_point);
@@ -155,6 +174,19 @@ fn screen_margin(width: f32) -> f32 { if width < 240.0 { 12.0 } else { 22.0 } }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn airborne_showcase_changes_angle_without_losing_the_aircraft() {
+        let plane = Plane::spawn(&crate::aircraft::c172::SPEC, 0.6, -1.3, 720.0, 0.0, 42.0);
+        let first = airborne_camera(&plane, 0.0).0;
+        assert!(first.distance(airborne_camera(&plane, 8.0).0) > plane.spec.cam_dist);
+        for n in 0..200 {
+            let (eye, dir, up) = airborne_camera(&plane, n as f64 * 0.1);
+            assert!(eye.distance(plane.centre()) >= plane.spec.cam_dist);
+            assert!(dir.dot((plane.centre() - eye).normalize()) > 0.9999);
+            assert!(up.is_finite());
+        }
+    }
 
     #[test]
     fn walkaround_requires_all_checks_before_boarding() {

@@ -467,6 +467,14 @@ impl Game {
                     }
                 });
             });
+            row(ui, t!("Pilot assistance", "Assistance au pilotage"),
+                t!("Gently levels the wings and reduces nose-up pressure near a stall.", "Remet doucement les ailes à plat et réduit le cabré près du décrochage."), |ui| {
+                    menu::switch(ui, &mut self.stability_assist);
+                });
+            row(ui, t!("Unlimited fuel", "Carburant illimité"),
+                t!("Prevents fuel exhaustion in piston and jet aircraft.", "Évite la panne sèche dans les avions à hélice et à réaction."), |ui| {
+                    menu::switch(ui, &mut self.infinite_fuel);
+                });
             row(ui, t!("Arcade mode", "Mode arcade"), t!("missiles, boost on any aircraft, weather and time keys", "missiles, boost sur tous les avions, touches météo et heure"), |ui| {
                 menu::switch(ui, &mut self.arcade);
             });

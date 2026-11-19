@@ -306,8 +306,12 @@ fn globe_sky(rd: vec3f, jit: f32) -> vec3f {
       // so adjusting from orbital to local exposure cannot hide the map.
       let night = 1.0 - smoothstep(-0.12, 0.08, mu);
       let relief = mix(texel.rgb, vec3f(0.012, 0.025, 0.046), water);
-      return surface + relief * vec3f(0.60, 0.78, 1.0)
+      let orbital = surface + relief * vec3f(0.60, 0.78, 1.0)
         * (night * (1.0 - G.detail.w) * 0.32 / max(G.time.z, 0.1));
+      // The city light atlas is too coarse for this height. Match the
+      // overhead tile map until real scenery lighting has faded in.
+      let local = (1.0 - smoothstep(90000.0, 150000.0, G.up.w)) * (1.0 - G.detail.w);
+      return mix(orbital, departure_map_color(texel.rgb, water, n), local);
     }
     return surface;
   }

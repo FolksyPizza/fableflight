@@ -98,7 +98,8 @@ pub const HUD_W: f32 = 410.0;
 #[derive(Copy, Clone)]
 enum PauseAct {
     Resume,
-    SaveFlight,
+    SaveFlight(usize),
+    Refuel,
     Respawn,
     GoTo,
     FlyTo(f64, f64, &'static str),
@@ -1215,7 +1216,9 @@ struct Game {
     ap: autopilot::Autopilot,
     runway_pilot: Option<pilot_assist::RunwayPilot>,
     stability_assist: bool,
-    saved_flight: Option<flight_save::FlightSave>,
+    infinite_fuel: bool,
+    saved_flights: [Option<flight_save::FlightSave>; flight_save::SLOTS],
+    show_saved_flights: bool,
     save_message: Option<String>,
     flight_plan: flightplan::FlightPlan,
     taxi_route: Vec<(f64, f64)>,
@@ -1326,6 +1329,7 @@ struct Game {
     preflight: Option<preflight::Stage>,
     preflight_step_since: f64,
     preflight_cockpit: bool,
+    briefing_exit: Option<(DVec3, f64)>,
     menu_overlay: Vec<egui::epaint::ClippedShape>,
     departure_terrain: f32,
     flight_ui_since: f64,
@@ -1561,13 +1565,13 @@ impl Game {
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { prefs.cam_mode }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
             utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], gfx, gfx_applied: None, prev_plane: Mat4::IDENTITY, plane_box, lamps,
             frame: 0, fps: 60.0, fps_log: (args.fps_log, Instant::now(), 0, 0.0), paused: false, show_help: false, show_hud: !args.no_hud && prefs.show_hud, hud_cockpit: prefs.hud_cockpit, arcade: args.arcade || prefs.arcade, goto_open: false, goto_text: String::new(), goto_rx: None,
-            status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, stage_at: args.stage_at, engines: args.engines, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, pad_y: false, pad_y_combo: false, ap: autopilot::Autopilot::default(), runway_pilot: None, stability_assist: false, saved_flight: flight_save::FlightSave::load(), save_message: None, flight_plan: Default::default(), taxi_route: Vec::new(), ap_off_t: -100.0, ap_script: args.ap_script.clone(), cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
+            status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, stage_at: args.stage_at, engines: args.engines, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, pad_y: false, pad_y_combo: false, ap: autopilot::Autopilot::default(), runway_pilot: None, stability_assist: prefs.stability_assist, infinite_fuel: prefs.infinite_fuel, saved_flights: flight_save::FlightSave::load_all(), show_saved_flights: false, save_message: None, flight_plan: Default::default(), taxi_route: Vec::new(), ap_off_t: -100.0, ap_script: args.ap_script.clone(), cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
             record: args.record.clone(), rec_audio: Vec::new(), rec_n: 0, rec_t0: Instant::now(), sound_on: prefs.sound_on, volume: prefs.volume, flight_tools_open: false, info_open: false, menu_hold: None, menu_hold_pending: false, info_page: menu::Page::Flight, pause_open: false, pause_page: menu::Page::Game, pause_at: args.pause_menu, settings_sec: args.settings.unwrap_or(settings_ui::Section::General), look_sens: prefs.look_sens, head: cockpit::Head::new(cy.to_radians(), cp), cockpit_fov: args.fov.unwrap_or(prefs.cockpit_fov).clamp(30.0, 90.0), head_live: false, warn: audio::Warn::default(), warn_t: [-10.0; 4],
             g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, quit: false,
             mode: if args.menu.unwrap_or(true) { Mode::Menu } else { Mode::Fly }, menu, menu_go: args.menu_go, heading: args.heading.to_radians(), destr: destruct::Destruction::new(secs.to_bits()),
             sheds: damage::Sheds::default(), fx_anchor: plane.pos, fx_shift: DVec3::ZERO, smoke_acc: 0.0, flash: Vec::new(), airport_note: (String::new(), -100.0), toolbar_t: -100.0, toolbar_hover_blocked: false, weapon_flash: None, kills: Vec::new(), damage_spec: args.damage.clone(), wreck_dirty: false, wreck_t: 0.0, wreck_seen: 0.0,
-            start_rx: None, loading: None, departure_intro: None, preflight: None, preflight_step_since: -100.0, preflight_cockpit: false, menu_overlay: Vec::new(), departure_terrain: 1.0, flight_ui_since: -100.0, scenery_cache: Default::default(), name_rx: None, last_click: -10.0, n_cars: 0, city_glow: 0.0, skyglow: Default::default(), gauges: gauges::Gauges::new(&plane, secs.to_bits()), glass, lightning, rain_field: storm::RainField::default(), cam_rain: 0.0, cam_hail: 0.0, storm_adapt: 0.0, plane, weapons,
+            start_rx: None, loading: None, departure_intro: None, preflight: None, preflight_step_since: -100.0, preflight_cockpit: false, briefing_exit: None, menu_overlay: Vec::new(), departure_terrain: 1.0, flight_ui_since: -100.0, scenery_cache: Default::default(), name_rx: None, last_click: -10.0, n_cars: 0, city_glow: 0.0, skyglow: Default::default(), gauges: gauges::Gauges::new(&plane, secs.to_bits()), glass, lightning, rain_field: storm::RainField::default(), cam_rain: 0.0, cam_hail: 0.0, storm_adapt: 0.0, plane, weapons,
             airport_rx: None, hold_spot: None, runway_steering: None, runway_assist: prefs.runway_assist, keyboard_rudder: prefs.keyboard_rudder, keyboard_rudder_fine: prefs.keyboard_rudder_fine, remember_start: prefs.remember_start,
             prefs_lang: args.lang.or(prefs.lang),
             prefs_t: 0.0,
@@ -1951,6 +1955,7 @@ impl Game {
         self.cancel_cockpit_input();
         self.flight_ended = None;
         self.preflight = None;
+        self.briefing_exit = None;
         self.taxi_route.clear();
         self.set_flight_tools(false);
         self.ap.disengage();
@@ -2031,6 +2036,7 @@ impl Game {
     }
     fn finish_departure(&mut self) {
         self.preflight = self.loading.take().and_then(|loading| loading.handoff);
+        self.preflight_step_since = self.real;
         self.preflight_cockpit = false;
         if let Some(stage) = self.preflight {
             log::info!("Departure awaiting pilot: {stage:?}");
@@ -2918,6 +2924,15 @@ impl Game {
             }
             Err(_) => self.menu_hold = None,
         }
+    }
+
+    fn can_refuel(&self) -> bool {
+        let p = &self.plane;
+        p.on_ground && p.vel.length() < 0.6 && p.parking_brake && !p.running
+            && !p.starter_on && !self.crashed && !p.wrecked() && p.spec.rocket().is_none()
+            && p.spec.fuel_kg - p.fuel > 0.01
+            && self.world.airfield_near(p.pos, 0.0)
+                .is_some_and(|field| field.geo.fuel_service(field.geo.local(p.pos)))
     }
 
     fn ap_disconnect(&mut self, why: Option<autopilot::Off>) {
@@ -3885,6 +3900,7 @@ impl Game {
         self.set_flight_tools(false);
         self.flight_ended = None;
         self.preflight = None;
+        self.briefing_exit = None;
         self.flight_plan = Default::default();
         self.runway_pilot = None;
         self.taxi_route.clear();
@@ -4616,7 +4632,7 @@ impl Game {
 
     /// The settings worth keeping, as they are now.
     fn live_settings(&self) -> settings::Settings {
-        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, hud_cockpit: self.hud_cockpit, minimap: self.minimap.visible, landing_guidance: self.minimap.landing_guidance, runway_assist: self.runway_assist, keyboard_rudder: self.keyboard_rudder, keyboard_rudder_fine: self.keyboard_rudder_fine, remember_start: self.remember_start, arcade: self.arcade, collision_mode: self.collision_mode, minimap_plan: self.minimap.plan, minimap_heading_up: self.minimap.heading_up, minimap_zoom: self.minimap.zoom, minimap_size: self.minimap.size.x, minimap_height: self.minimap.size.y, taa: self.gfx.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time, last: self.last_start.clone() }
+        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, hud_cockpit: self.hud_cockpit, minimap: self.minimap.visible, landing_guidance: self.minimap.landing_guidance, runway_assist: self.runway_assist, stability_assist: self.stability_assist, infinite_fuel: self.infinite_fuel, keyboard_rudder: self.keyboard_rudder, keyboard_rudder_fine: self.keyboard_rudder_fine, remember_start: self.remember_start, arcade: self.arcade, collision_mode: self.collision_mode, minimap_plan: self.minimap.plan, minimap_heading_up: self.minimap.heading_up, minimap_zoom: self.minimap.zoom, minimap_size: self.minimap.size.x, minimap_height: self.minimap.size.y, taa: self.gfx.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time, last: self.last_start.clone() }
     }
 
     /// Saves the settings when they have changed (looked at once a second,
@@ -4826,6 +4842,7 @@ impl Game {
         }
 
         // Physics at a fixed step.
+        self.plane.infinite_fuel = self.infinite_fuel && self.spec.rocket().is_none();
         let mut c = self.controls(dt_real);
         if let Some(runway) = self.runway_steering
             && self.runway_pilot.is_none() && self.runway_assist && dt > 0.0 && !self.crashed
@@ -5292,6 +5309,11 @@ impl Game {
             (cam, dir, upv) = preflight::walkaround_camera(&self.plane, step, easing);
             fov = 54f32.to_radians();
             self.cam_pos = cam;
+        } else if staged == Some(preflight::Stage::Airborne) && !cockpit_view {
+            let elapsed = if self.preflight.is_some() { self.real - self.preflight_step_since } else { 0.0 };
+            (cam, dir, upv) = preflight::airborne_camera(&self.plane, elapsed);
+            fov = 52f32.to_radians();
+            self.cam_pos = cam;
         } else if cockpit_view {
             if !self.head_live {
                 self.head.reset(self.cam_yaw, self.cam_pitch);
@@ -5325,8 +5347,19 @@ impl Game {
             let sz = self.spec.cam_dist / 16.0;
             let at = self.plane.centre();
             let dist = self.cam_dist * if self.plane.stage > 0 { 0.5 } else { 1.0 };
-            cam = at + d * dist + u * (1.5 * sz) + (self.plane.right() * self.rng.range(-1.0, 1.0) as f64 + u * self.rng.range(-1.0, 1.0) as f64) * (vibe * 0.03);
-            dir = if rocket { (at - cam).normalize() } else { (self.plane.pos + u * (1.2 * sz) + self.plane.forward() * (6.0 * sz) - cam).normalize() };
+            let mut offset = d * dist + u * (1.5 * sz);
+            let mut aim = self.plane.pos + u * (1.2 * sz) + self.plane.forward() * (6.0 * sz);
+            if let Some((from, start)) = self.briefing_exit {
+                let blend = Loading::ease((self.real - start) / 0.72);
+                let turn = DQuat::from_rotation_arc(from.normalize(), offset.normalize());
+                let radial = DQuat::IDENTITY.slerp(turn, blend) * from.normalize();
+                offset = radial * (from.length() + (offset.length() - from.length()) * blend);
+                aim = at.lerp(aim, blend);
+                fov = (52.0 + 8.0 * blend as f32).to_radians();
+                if blend >= 1.0 { self.briefing_exit = None; }
+            }
+            cam = at + offset + (self.plane.right() * self.rng.range(-1.0, 1.0) as f64 + u * self.rng.range(-1.0, 1.0) as f64) * (vibe * 0.03);
+            dir = if rocket { (at - cam).normalize() } else { (aim - cam).normalize() };
             upv = if rocket { u } else { (u + self.plane.up() * 0.25).normalize() };
             self.cam_pos = cam;
             self.cam_look = self.plane.pos;
@@ -6614,8 +6647,19 @@ impl Game {
             if menu::big_button(ui, t!("Respawn in the air", "Réapparaître en vol"), Hint::of("R", ""), false, false).clicked() {
                 *act = Some(PauseAct::Respawn);
             }
-            if self.can_save_flight() && menu::big_button(ui, t!("Save flight", "Enregistrer le vol"), Hint::None, false, false).clicked() {
-                *act = Some(PauseAct::SaveFlight);
+            if self.can_save_flight() {
+                ui.menu_button(t!("Save flight", "Enregistrer le vol"), |ui| {
+                    for (slot, save) in self.saved_flights.iter().enumerate() {
+                        let label = match save {
+                            Some(save) => t!("Replace slot {} · {}", "Remplacer l’emplacement {} · {}", slot + 1, save.label()),
+                            None => t!("Save to slot {}", "Enregistrer dans l’emplacement {}", slot + 1),
+                        };
+                        if ui.button(label).clicked() {
+                            *act = Some(PauseAct::SaveFlight(slot));
+                            ui.close();
+                        }
+                    }
+                });
             }
             if let Some(message) = &self.save_message {
                 ui.label(RichText::new(message).font(menu::caption()).color(DIM));
@@ -6852,7 +6896,9 @@ impl Game {
                                 }
                                 row(ui, t!("Gear", "Train"), if p.gear >= 1.0 { t!("down", "sorti") } else if p.gear <= 0.0 { t!("up", "rentré") } else { t!("moving", "en mouvement") }.into(), TEXT);
                                 let low = Color32::from_rgb(255, 180, 50);
-                                row(ui, t!("Fuel", "Carburant"), format!("{:.0} kg  ·  {:.0}%", p.fuel, p.fuel_frac() * 100.0), if p.fuel_frac() < 0.1 { low } else { TEXT });
+                                let fuel = if p.infinite_fuel { t!("Unlimited", "Illimité").into() }
+                                    else { format!("{:.0} kg  ·  {:.0}%", p.fuel, p.fuel_frac() * 100.0) };
+                                row(ui, t!("Fuel", "Carburant"), fuel, if !p.infinite_fuel && p.fuel_frac() < 0.1 { low } else { TEXT });
                                 let flow = match p.endurance() {
                                     Some(e) => format!("{:.0} kg/h  ·  {}h{:02}", p.fuel_flow * 3600.0, (e / 3600.0) as u32, (e / 60.0) as u32 % 60),
                                     None => "—".into(),
@@ -6887,6 +6933,12 @@ impl Game {
                             let on = p.running || p.starter_on;
                             if ui.button(if on { t!("Shut the engine down  F4", "Couper le moteur  F4") } else { t!("Start the engine  F4", "Démarrer le moteur  F4") }).clicked() {
                                 engine_btn = Some(!on);
+                            }
+                            if p.on_ground && p.spec.rocket().is_none() {
+                                let fuel = ui.add_enabled(self.can_refuel(), egui::Button::new(t!("Refuel to full", "Faire le plein")));
+                                if fuel.on_disabled_hover_text(t!("Park clear of the runway, set the parking brake and shut down the engine.", "Stationnez hors de la piste, serrez le frein de parc et coupez le moteur.")).clicked() {
+                                    *act = Some(PauseAct::Refuel);
+                                }
                             }
                             let report = p.dmg.report();
                             if self.crashed {
@@ -7310,12 +7362,13 @@ impl Game {
             let fuel = p.fuel_frac() * 100.0;
             let aoa = if ias_kt >= 10.0 { format!("{:+.1}°", p.alpha.to_degrees()) } else { "—".into() };
             let aoa_color = if p.stalled { red } else if ias_kt >= 10.0 && p.alpha.abs() > p.stall_alpha() * 0.85 { amber } else { white };
-            let fuel_color = if fuel <= 0.0 { red } else if fuel < 10.0 { amber } else { white };
+            let fuel_color = if p.infinite_fuel { white } else if fuel <= 0.0 { red } else if fuel < 10.0 { amber } else { white };
+            let fuel_text = if p.infinite_fuel { "∞".into() } else { format!("{fuel:.0}%") };
             let vs_color = if self.warn.pull_up { red } else if self.warn.sink { amber } else { white };
             let rate = (vs_fpm / 10.0).round() * 10.0;
             let rate = if rate.abs() < 10.0 { "0".into() } else { format!("{rate:+.0}") };
             let mut readouts = vec![
-                (t!("FUEL", "CARB."), format!("{fuel:.0}%"), fuel_color),
+                (t!("FUEL", "CARB."), fuel_text, fuel_color),
                 ("AOA", aoa, aoa_color),
                 ("FT/MIN", rate, vs_color),
             ];
@@ -7531,9 +7584,9 @@ impl Game {
                 if p.g_load.abs() > 5.0 {
                     alert(t!("OVER G", "FACTEUR DE CHARGE"), if p.dmg.fatigue > 1.2 { red } else { amber }, Some(format!("{:+.1} g", p.g_load)));
                 }
-                if p.fuel <= 0.0 {
+                if p.fuel <= 0.0 && !p.infinite_fuel {
                     alert(t!("NO FUEL", "PLUS DE CARBURANT"), red, None);
-                } else if p.fuel_frac() < 0.1 {
+                } else if !p.infinite_fuel && p.fuel_frac() < 0.1 {
                     alert(t!("LOW FUEL", "CARBURANT BAS"), amber, None);
                 }
                 if !p.running && !p.on_ground {
@@ -7703,7 +7756,13 @@ impl Game {
         }
         match act {
             Some(PauseAct::Resume) => self.set_pause_menu(false),
-            Some(PauseAct::SaveFlight) => self.save_flight(),
+            Some(PauseAct::SaveFlight(slot)) => self.save_flight(slot),
+            Some(PauseAct::Refuel) if self.can_refuel() => {
+                self.plane.fuel = self.spec.fuel_kg;
+                self.status = t!("Fuel tanks full", "Réservoirs pleins").into();
+                self.status_until = self.real + 6.0;
+            }
+            Some(PauseAct::Refuel) => {}
             Some(PauseAct::Respawn) => {
                 self.set_pause_menu(false);
                 self.set_flight_tools(false);

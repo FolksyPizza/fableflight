@@ -594,6 +594,13 @@ impl Geo {
         };
         (0..self.runways.len()).flat_map(|ri| [(ri, 0), (ri, 1)]).max_by(|a, b| score(a.0, a.1).total_cmp(&score(b.0, b.1)))
     }
+    pub fn fuel_service(&self, p: Vec2) -> bool {
+        self.on_runway(p, 15.0).is_none()
+            && (self.stands.iter().any(|s| s.pos.distance(p) <= 35.0)
+                || self.aprons.iter().any(|apron| in_poly(p, apron))
+                || (self.stands.is_empty() && self.aprons.is_empty() && p.length() < self.radius))
+    }
+
     /// Is a local point over a runway's pavement? Which one.
     pub fn on_runway(&self, p: Vec2, margin: f32) -> Option<usize> {
         self.runways.iter().position(|r| {

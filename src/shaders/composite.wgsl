@@ -612,6 +612,11 @@ fn composite_sample(in: FsIn, z: f32, c0: vec4f, a0: vec4f, amb: f32) -> vec3f {
   let dist = length(P);
   var col = c0.rgb / cov;
   let aux = a0 / cov;
+  // The departure map is already lit for the selected time and exposure.
+  if (G.detail.w < 1.0 && aux.a < -1.5) {
+    if (cov < 0.996) { col = mix(sky_color(rd, jit), col, cov); }
+    return col;
+  }
   // The start screen's globe, seen from orbit (sky.wgsl), taking over from
   // the flight scene as the camera rises.
   let gk = globe_k();

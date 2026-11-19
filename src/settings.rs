@@ -64,6 +64,8 @@ pub struct Settings {
     pub minimap: bool,
     pub landing_guidance: bool,
     pub runway_assist: bool,
+    pub stability_assist: bool,
+    pub infinite_fuel: bool,
     pub keyboard_rudder: f64,
     pub keyboard_rudder_fine: f64,
     pub remember_start: bool,
@@ -118,7 +120,7 @@ impl LastStart {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, hud_cockpit: false, minimap: true, landing_guidance: true, runway_assist: true, keyboard_rudder: 1.0, keyboard_rudder_fine: 0.35, remember_start: false, arcade: false, collision_mode: CollisionMode::default(), minimap_plan: false, minimap_heading_up: false, minimap_zoom: 12, minimap_size: 280.0, minimap_height: 280.0, taa: true, live_traffic: true, live_weather: true, real_time: true, last: None }
+        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, hud_cockpit: false, minimap: true, landing_guidance: true, runway_assist: true, stability_assist: false, infinite_fuel: false, keyboard_rudder: 1.0, keyboard_rudder_fine: 0.35, remember_start: false, arcade: false, collision_mode: CollisionMode::default(), minimap_plan: false, minimap_heading_up: false, minimap_zoom: 12, minimap_size: 280.0, minimap_height: 280.0, taa: true, live_traffic: true, live_weather: true, real_time: true, last: None }
     }
 }
 
@@ -152,6 +154,8 @@ impl Settings {
             minimap: b("minimap", d.minimap),
             landing_guidance: b("landing_guidance", d.landing_guidance),
             runway_assist: b("runway_assist", d.runway_assist),
+            stability_assist: b("stability_assist", d.stability_assist),
+            infinite_fuel: b("infinite_fuel", d.infinite_fuel),
             keyboard_rudder: f("keyboard_rudder", d.keyboard_rudder).clamp(0.25, 1.0),
             keyboard_rudder_fine: f("keyboard_rudder_fine", d.keyboard_rudder_fine).clamp(0.1, 0.75),
             remember_start: b("remember_start", d.remember_start),
@@ -183,6 +187,8 @@ impl Settings {
             "minimap": self.minimap,
             "landing_guidance": self.landing_guidance,
             "runway_assist": self.runway_assist,
+            "stability_assist": self.stability_assist,
+            "infinite_fuel": self.infinite_fuel,
             "keyboard_rudder": self.keyboard_rudder,
             "keyboard_rudder_fine": self.keyboard_rudder_fine,
             "remember_start": self.remember_start,
@@ -220,7 +226,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, hud_cockpit: true, minimap: false, landing_guidance: false, runway_assist: false, keyboard_rudder: 0.8, keyboard_rudder_fine: 0.4, remember_start: true, arcade: true, collision_mode: CollisionMode::EndFlight, minimap_plan: true, minimap_heading_up: true, minimap_zoom: 15, minimap_size: 420.0, minimap_height: 300.0, taa: false, live_traffic: false, live_weather: false, real_time: false, last: Some(LastStart { lat: 37.6, lon: -122.4, name: "KSFO".into(), airport: Some("KSFO".into()), start: "approach".into(), runway: Some("28L".into()), aircraft: "c172".into() }) };
+        let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, hud_cockpit: true, minimap: false, landing_guidance: false, runway_assist: false, stability_assist: true, infinite_fuel: true, keyboard_rudder: 0.8, keyboard_rudder_fine: 0.4, remember_start: true, arcade: true, collision_mode: CollisionMode::EndFlight, minimap_plan: true, minimap_heading_up: true, minimap_zoom: 15, minimap_size: 420.0, minimap_height: 300.0, taa: false, live_traffic: false, live_weather: false, real_time: false, last: Some(LastStart { lat: 37.6, lon: -122.4, name: "KSFO".into(), airport: Some("KSFO".into()), start: "approach".into(), runway: Some("28L".into()), aircraft: "c172".into() }) };
         assert_eq!(Settings::from_json(&s.to_json()), s);
         assert_eq!(Settings::from_json(&serde_json::json!({"remember_start": true, "last_start": {"lat": 300.0, "lon": 0.0}})).last, None);
         let mut old = s.to_json();

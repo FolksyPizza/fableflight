@@ -1,8 +1,10 @@
-//! One local flight checkpoint, independent of the planner's last departure.
+//! Local flight checkpoints, independent of the planner's last departure.
 use crate::{Game, aircraft, airports, geo, t};
 use glam::{DQuat, DVec3};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+pub const SLOTS: usize = 4;
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct FlightSave {
@@ -26,18 +28,24 @@ pub struct FlightSave {
     route: Vec<String>,
     arrival_runway: String,
     cruise_ft: u32,
-    stability: bool,
 }
 
 impl FlightSave {
-    fn path() -> Option<PathBuf> {
-        dirs::config_dir().map(|dir| dir.join("fablegame").join("flight-save.json"))
+    fn path(slot: usize) -> Option<PathBuf> {
+        let dir = dirs::config_dir()?.join("fablegame");
+        match slot {
+            0 => Some(dir.join("flight-save.json")),
+            1..SLOTS => Some(dir.join(format!("flight-save-{}.json", slot + 1))),
+            _ => None,
+        }
     }
 
-    pub fn load() -> Option<Self> {
-        let data = std::fs::read(Self::path()?).ok()?;
-        let save: Self = serde_json::from_slice(&data).ok()?;
-        save.valid().then_some(save)
+    pub fn load_all() -> [Option<Self>; SLOTS] {
+        std::array::from_fn(|slot| {
+            let data = std::fs::read(Self::path(slot)?).ok()?;
+            let save: Self = serde_json::from_slice(&data).ok()?;
+            save.valid().then_some(save)
+        })
     }
 
     fn valid(&self) -> bool {
@@ -60,8 +68,8 @@ impl FlightSave {
             && self.cruise_ft <= 55_000
     }
 
-    fn store(&self) -> anyhow::Result<()> {
-        let path = Self::path().ok_or_else(|| anyhow::anyhow!("no configuration directory"))?;
+    fn store(&self, slot: usize) -> anyhow::Result<()> {
+        let path = Self::path(slot).ok_or_else(|| anyhow::anyhow!("no configuration directory"))?;
         let dir = path.parent().ok_or_else(|| anyhow::anyhow!("no checkpoint directory"))?;
         std::fs::create_dir_all(dir)?;
         let tmp = path.with_extension("tmp");
@@ -70,7 +78,17 @@ impl FlightSave {
         Ok(())
     }
 
-    pub fn aircraft_name(&self) -> &str {
+    pub fn label(&self) -> String {
+        let (lat, lon, alt) = geo::pos_to_lla(DVec3::from_array(self.position));
+        let area = self.route.last().map_or_else(|| crate::menu::latlon(lat.to_degrees(), lon.to_degrees()), |dest| dest.clone());
+        if self.on_ground {
+            format!("{} · {}", self.aircraft_name(), area)
+        } else {
+            format!("{} · {} · {:.0} ft", self.aircraft_name(), area, alt * 3.28084)
+        }
+    }
+
+    fn aircraft_name(&self) -> &str {
         aircraft::by_key(&self.aircraft).map_or(self.aircraft.as_str(), |spec| spec.name)
     }
 }
@@ -83,8 +101,8 @@ impl Game {
             && (!self.plane.on_ground || self.plane.vel.length() < 1.2)
     }
 
-    pub(crate) fn save_flight(&mut self) {
-        if !self.can_save_flight() { return; }
+    pub(crate) fn save_flight(&mut self, slot: usize) {
+        if !self.can_save_flight() || slot >= SLOTS { return; }
         let p = &self.plane;
         let save = FlightSave {
             version: 1, aircraft: self.spec.keys[0].to_owned(), position: p.pos.to_array(),
@@ -94,15 +112,14 @@ impl Game {
             utc: self.utc, day: self.doy, route: self.flight_plan.airports.iter()
                 .map(|&id| airports::Db::get().apts[id as usize].ident.clone()).collect(),
             arrival_runway: self.flight_plan.runway.clone(), cruise_ft: self.flight_plan.cruise_ft,
-            stability: self.stability_assist,
         };
         if !save.valid() {
             self.save_message = Some(t!("This flight state cannot be saved", "Cet état de vol ne peut pas être enregistré").into());
             return;
         }
-        match save.store() {
+        match save.store(slot) {
             Ok(()) => {
-                self.saved_flight = Some(save);
+                self.saved_flights[slot] = Some(save);
                 self.save_message = Some(t!("Flight saved", "Vol enregistré").into());
             }
             Err(err) => {
@@ -112,8 +129,8 @@ impl Game {
         }
     }
 
-    pub(crate) fn resume_saved_flight(&mut self) {
-        let Some(save) = self.saved_flight.clone() else { return };
+    pub(crate) fn resume_saved_flight(&mut self, slot: usize) {
+        let Some(save) = self.saved_flights.get(slot).and_then(Clone::clone) else { return };
         let Some(spec) = aircraft::by_key(&save.aircraft).filter(|spec| spec.rocket().is_none()) else {
             self.status = t!("Install the saved flight’s aircraft to resume", "Installez l’avion du vol enregistré pour reprendre").into();
             self.save_message = Some(self.status.clone());
@@ -155,7 +172,6 @@ impl Game {
         self.doy = save.day;
         self.menu_time_set = true;
         self.wx.real_time = false;
-        self.stability_assist = save.stability;
         self.flight_plan.airports = save.route.iter().filter_map(|name| airports::Db::get().find(name)).collect();
         self.flight_plan.runway = save.arrival_runway;
         self.flight_plan.cruise_ft = save.cruise_ft;
@@ -163,6 +179,7 @@ impl Game {
         self.status = t!("Saved flight restored", "Vol enregistré restauré").into();
         self.status_until = self.real + 20.0;
         self.mode = crate::Mode::Fly;
+        self.departure_terrain = 0.0;
         self.prepare_departure((!save.on_ground).then_some(crate::preflight::Stage::Airborne));
     }
 }
@@ -195,7 +212,6 @@ mod tests {
             route: vec!["KLGA".into()],
             arrival_runway: "22".into(),
             cruise_ft: 3500,
-            stability: true,
         };
         let mut restored: FlightSave = serde_json::from_slice(&serde_json::to_vec(&save).unwrap()).unwrap();
         assert!(restored.valid());

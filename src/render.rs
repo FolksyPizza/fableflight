@@ -1504,7 +1504,8 @@ impl Renderer {
         let samples = if integrated && info.vendor == 0x8086 && msaa_override.is_none() { samples.min(2) } else { samples };
         // 4x is always supported, other counts need adapter format features.
         let afeat = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
-        let ok = samples == 4 || (adapter.features().contains(afeat) && [HDR, AMB, DEPTH].iter().all(|f| adapter.get_texture_format_features(*f).flags.sample_count_supported(samples)));
+        // The resolve and water edge passes require multisampled bindings.
+        let ok = samples == 4 || (samples > 1 && adapter.features().contains(afeat) && [HDR, AMB, DEPTH].iter().all(|f| adapter.get_texture_format_features(*f).flags.sample_count_supported(samples)));
         MSAA_N.store(if ok { samples } else { 4 }, std::sync::atomic::Ordering::Relaxed);
         let required_features = if msaa() != 4 { afeat } else { wgpu::Features::empty() } | crate::gputime::GpuTimer::features(&adapter);
         log::info!("MSAA {}x", msaa());

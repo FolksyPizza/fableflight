@@ -106,6 +106,7 @@ pub struct Plane {
     charge: f64,
     /// fuel on board (kg), and what the engines are burning (kg/s)
     pub fuel: f64,
+    pub infinite_fuel: bool,
     pub fuel_flow: f64,
     /// the magnetos on (a jet: the fuel control at RUN), and the mixture
     /// lever (0 idle cut-off .. 1 full rich; jets have none)
@@ -283,6 +284,7 @@ impl Plane {
             power: 0.7,
             charge: 0.0,
             fuel: spec.fuel_kg * 0.5,
+            infinite_fuel: false,
             fuel_flow: 0.0,
             ignition: true,
             mixture: 1.0,
@@ -469,7 +471,7 @@ impl Plane {
 
     /// How long the fuel lasts at the present burn (s), while it burns any.
     pub fn endurance(&self) -> Option<f64> {
-        (self.fuel_flow > 1e-6).then(|| self.fuel / self.fuel_flow)
+        (!self.infinite_fuel && self.fuel_flow > 1e-6).then(|| self.fuel / self.fuel_flow)
     }
 
     /// Cold and dark: magnetos off and mixture at cut-off (a jet: fuel
@@ -1531,7 +1533,7 @@ impl Plane {
                 // (The starter needs power from the bus; the magnetos do not.)
                 let cranking = (c.starter || self.auto_start > 0.0) && self.sys.powered();
                 self.cranking = cranking;
-                self.running = self.ignition && self.fuel_selector != FuelSelector::Off && self.fuel > 0.0 && self.mixture > 0.08 && w > 8.0 && eng > 0.0 && !self.sys.fail.engine;
+                self.running = self.ignition && self.fuel_selector != FuelSelector::Off && (self.fuel > 0.0 || self.infinite_fuel) && self.mixture > 0.08 && w > 8.0 && eng > 0.0 && !self.sys.fail.engine;
                 let mix = smooth(0.08, 0.45, self.mixture);
                 let q_eng = if self.running { Self::engine_torque(pe, self.charge, rho, c.boost, eng) * mix } else { 0.0 } + if cranking { 120.0 * (1.0 - w / 25.0).max(0.0) } else { 0.0 };
                 if self.auto_start > 0.0 {
@@ -1591,7 +1593,7 @@ impl Plane {
                 // dead engine windmills in the airflow.
                 // Starting: the starter turns the core up; past light-off, with the fuel
                 // controls at RUN, it lights and runs itself up to idle.
-                let can_run = self.ignition && self.fuel > 0.0 && eng > 0.0 && !self.sys.fail.engine;
+                let can_run = self.ignition && (self.fuel > 0.0 || self.infinite_fuel) && eng > 0.0 && !self.sys.fail.engine;
                 if !can_run {
                     self.running = false;
                 } else if !self.running && self.n1 > 0.4 * fe.idle {
@@ -1634,10 +1636,10 @@ impl Plane {
             Engine::Rocket(_) => {}
         }
         self.prop += dt * self.prop_rate;
-        self.fuel = (self.fuel - self.fuel_flow * dt).max(0.0);
-        if self.sys.fail.fuel_leak {
+        if !self.infinite_fuel {
             // A leak bleeds about 40% of a full-power burn, engine or not.
-            self.fuel = (self.fuel - spec.fuel_flow[1] * 0.4 * dt).max(0.0);
+            let leak = if self.sys.fail.fuel_leak { spec.fuel_flow[1] * 0.4 } else { 0.0 };
+            self.fuel = (self.fuel - (self.fuel_flow + leak) * dt).max(0.0);
         }
         // The electrics: the alternator (the jets' generators) charging once the
         // engine turns fast enough (a piston's above ~900 rpm), the starter drawing.
@@ -3579,6 +3581,23 @@ mod tests {
         p.fuel = 50.0;
         run(&mut p, 2.0, &Controls::default());
         assert!(p.running, "{}", rpm(&p));
+    }
+
+    #[test]
+    fn unlimited_fuel_preserves_load_and_keeps_the_engine_running() {
+        let mut p = Plane::spawn(C172, 0.6, -2.1, 1500.0, 0.0, 50.0);
+        p.infinite_fuel = true;
+        p.fuel = 0.002;
+        let world = flat_world();
+        let controls = Controls::default();
+        assert!(!run(&mut p, &world, 3.0, controls).0);
+        assert!(p.running && p.fuel_flow > 0.0);
+        assert_eq!(p.fuel, 0.002);
+        assert_eq!(p.endurance(), None);
+        p.infinite_fuel = false;
+        assert!(!run(&mut p, &world, 3.0, controls).0);
+        assert_eq!(p.fuel, 0.0);
+        assert!(!p.running);
     }
 
     #[test]

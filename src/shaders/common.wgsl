@@ -1727,6 +1727,16 @@ fn photo_hides(P: vec3f, px: vec2f) -> bool {
 const GLOBE_LO = 150000.0;
 const GLOBE_HI = 800000.0;
 fn globe_k() -> f32 { return select(0.0, smoothstep(GLOBE_LO, GLOBE_HI, G.up.w), G.start.x > 0.0); }
+
+// Shared by the bundled globe and the higher-resolution map tiles underneath
+// the departure camera. Return scene-linear colour for the current exposure.
+fn departure_map_color(img: vec3f, water: f32, normal: vec3f) -> vec3f {
+  let mu = dot(normal, G.sun_dir.xyz);
+  let daylight = smoothstep(-0.14, 0.55, mu);
+  let tint = mix(vec3f(0.17, 0.25, 0.36), vec3f(1.25, 1.18, 1.07), daylight);
+  let albedo = mix(img, vec3f(0.012, 0.024, 0.044), water);
+  return albedo * tint / max(G.time.z, 0.1);
+}
 fn night_at(upn: vec3f) -> f32 { return 1.0 - smoothstep(-0.08, 0.1, dot(upn, G.sun_dir.xyz)); }
 // Moonlight arriving at a point (dimmed by the atmosphere near the horizon and
 // by the cloud deck as a whole).
