@@ -508,7 +508,7 @@ impl Geo {
         let (threshold, direction) = runway.end(end);
         let clearance = wingspan.mul_add(0.55, 9.0);
         let clear = |p| self.on_runway(p, clearance).is_none();
-        let size = [14.0, 24.0, 35.0, 48.0].into_iter().filter(|&limit| wingspan > limit).count() as u8;
+        let size = stand_size(wingspan);
         if let Some(stand) = self.stands.iter().filter(|s| !s.terminal && s.size >= size && clear(s.pos))
             .min_by(|a, b| a.pos.distance_squared(threshold).total_cmp(&b.pos.distance_squared(threshold)))
         {
@@ -594,6 +594,32 @@ impl Geo {
         };
         (0..self.runways.len()).flat_map(|ri| [(ri, 0), (ri, 1)]).max_by(|a, b| score(a.0, a.1).total_cmp(&score(b.0, b.1)))
     }
+    /// An eligible stand or apron at this airport, closest to the aircraft.
+    pub fn nearest_fuel_service(&self, from: Vec2, wingspan: f32) -> Option<Vec2> {
+        let clearance = wingspan.mul_add(0.55, 15.0);
+        let size = stand_size(wingspan);
+        let stands = self.stands.iter()
+            .filter(|s| s.size >= size)
+            .map(|s| s.pos);
+        let aprons = self.aprons.iter().filter_map(|apron| {
+            let ring = apron.first().filter(|ring| !ring.is_empty())?;
+            let middle = ring.iter().copied().sum::<Vec2>() / ring.len() as f32;
+            let room = |p| [Vec2::ZERO, Vec2::X, -Vec2::X, Vec2::Y, -Vec2::Y]
+                .into_iter().all(|offset| in_poly(p + offset * clearance, apron));
+            // Also consider suitable space near the aircraft on a large apron.
+            [from, from.lerp(middle, 0.5), middle].into_iter().find(|&p| room(p))
+        });
+        let nearest = |a: &Vec2, b: &Vec2| a.distance_squared(from).total_cmp(&b.distance_squared(from));
+        let usable = |&p: &Vec2| self.on_runway(p, clearance).is_none() && self.fuel_service(p);
+        stands.chain(aprons).filter(usable).min_by(nearest).or_else(|| {
+            if !self.stands.is_empty() || !self.aprons.is_empty() { return None; }
+            (0..self.runways.len()).flat_map(|i| (0..2).map(move |end| (i, end)))
+                .filter_map(|(i, end)| self.player_parking(i, end, wingspan).map(|(p, _, _)| p))
+                .filter(usable)
+                .min_by(nearest)
+        })
+    }
+
     pub fn fuel_service(&self, p: Vec2) -> bool {
         self.on_runway(p, 15.0).is_none()
             && (self.stands.iter().any(|s| s.pos.distance(p) <= 35.0)
@@ -608,6 +634,10 @@ impl Geo {
             s > -margin && s < r.len + margin && x.abs() < r.width * 0.5 + margin
         })
     }
+}
+
+fn stand_size(wingspan: f32) -> u8 {
+    [14.0, 24.0, 35.0, 48.0].into_iter().filter(|&limit| wingspan > limit).count() as u8
 }
 
 fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
@@ -1271,6 +1301,26 @@ pub fn geo_for(src: &Sources, idx: u32) -> Result<std::sync::Arc<Geo>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nearest_fuel_service_skips_runway_and_undersized_parking() {
+        let src = Sources::new(crate::fetch::Fetcher::new(std::env::temp_dir(), true), String::new());
+        let mut field = build_geo(&src, Db::get().find("KSFO").unwrap()).unwrap();
+        let r = &field.runways[0];
+        let runway = (r.a + r.b) * 0.5;
+        let side = right_of(r.dir);
+        let clear = |offset: f32| runway + side * offset;
+        let near = (130..2000).map(|d| clear(d as f32))
+            .find(|&p| field.on_runway(p, 100.0).is_none()).unwrap();
+        let far = (80..1000).map(|d| near + side * d as f32)
+            .find(|&p| field.on_runway(p, 100.0).is_none()).unwrap();
+        let stand = |pos, size| Stand { pos, size, dir: r.dir, gate: String::new(), node: 0, terminal: false };
+        field.aprons.clear();
+        field.stands = vec![stand(far, 4), stand(near, 0), stand(runway, 4)];
+        assert_eq!(field.nearest_fuel_service(runway, 11.0), Some(near));
+        assert_eq!(field.nearest_fuel_service(runway, 64.0), Some(far));
+        assert!(!field.fuel_service(runway));
+    }
 
     #[test]
     fn cold_offline_airport_keeps_the_selected_runway_end() {

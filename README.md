@@ -125,7 +125,7 @@ Press **Home** or click the right stick to recenter the cockpit or chase view. *
 
 To continue another time, open the pause menu and choose **Save flight**. There are four local slots. Use an empty slot to keep an existing flight, or choose **Replace slot** to overwrite it. From the main menu, choose **Resume saved flight** and pick a checkpoint if you have more than one. The aircraft state and remaining route are restored. Re-engage autopilot manually after resuming.
 
-Set departure fuel in the flight planner. To fill the tanks again, park clear of the runway at an airport, set the parking brake, shut down the engine, and select **Refuel to full** under **Tab → Flight**. **Settings → General → Flight rules → Unlimited fuel** keeps piston and jet aircraft from running out of fuel.
+Set departure fuel in the flight planner. Near an airport, choose **Tab → Flight → Mark nearest fuel** to mark the nearest suitable refueling spot on the moving map. These spots use the simulator’s stands or aprons when mapped. Taxi manually to the marked spot, set the parking brake, shut down the engine, and select **Refuel to full**. You can clear the marker from the same panel. **Settings → General → Flight rules → Unlimited fuel** keeps piston and jet aircraft from running out of fuel.
 
 The flight HUD shows wind direction and speed, ground track, fuel remaining, angle of attack (AOA) and vertical speed. Wind direction is where the wind comes from. The arrow points where it is blowing relative to the aircraft. Urgent warnings such as **PULL UP** and **STALL** appear in the attitude display. Aircraft condition and recent failures appear in a compact panel. Press **H** to toggle the HUD in the current view.
 

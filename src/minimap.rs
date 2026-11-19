@@ -334,7 +334,7 @@ impl Minimap {
         }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, heading: Option<f64>, view_width: f32, guide: Option<&crate::approach::Guide>, taxi: &[(f64, f64)], world: &crate::world::World) {
+    pub fn show(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, heading: Option<f64>, view_width: f32, guide: Option<&crate::approach::Guide>, taxi: &[(f64, f64)], fuel: Option<(f64, f64)>, world: &crate::world::World) {
         let screen = ctx.content_rect();
         let side = (view_width - crate::HUD_W) * 0.5 - 26.0;
         let limit = side.min(screen.bottom() - self.bottom - 52.0 - self.top).min(640.0);
@@ -449,6 +449,26 @@ impl Minimap {
                 let arrow = [Vec2::new(0.0, -13.0), Vec2::new(9.0, 10.0), Vec2::new(-9.0, 10.0)];
                 let points: Vec<_> = arrow.into_iter().map(|v| rect.center() + rotate(v, self.heading + angle)).collect();
                 painter.add(egui::Shape::convex_polygon(points, Color32::from_rgb(255, 210, 70), Stroke::new(2.0, Color32::BLACK)));
+                if let Some((lat, lon)) = fuel.filter(|_| supported) {
+                    let offset = Vec2::new(tile_offset(geo::lon_to_merc_x(lon) * n, cx, n) as f32,
+                        (geo::lat_to_merc_y(lat) * n - cy) as f32) * 256.0;
+                    let offset = rotate(offset, angle);
+                    let text = crate::t!("Fuel", "Carburant");
+                    let tint = Color32::from_rgb(125, 236, 166);
+                    let font = crate::menu::caption();
+                    let galley = painter.layout_no_wrap(text.to_owned(), font, tint);
+                    let inset = (radius - (galley.size().x * 0.5 + 10.0).max(24.0)).max(12.0);
+                    let beyond = offset.length() > inset;
+                    let at = center + if beyond { offset.normalized() * inset } else { offset };
+                    let label = egui::Rect::from_center_size(at, galley.size() + Vec2::new(10.0, 5.0));
+                    if beyond {
+                        let direction = offset.normalized();
+                        painter.arrow(at + direction * 8.0, direction * 13.0, Stroke::new(2.0, tint));
+                    }
+                    painter.rect_filled(label, crate::menu::R_WIDGET, Color32::from_black_alpha(230));
+                    painter.rect_stroke(label, crate::menu::R_WIDGET, Stroke::new(1.0, tint), egui::StrokeKind::Inside);
+                    painter.galley(label.center() - galley.size() * 0.5, galley, tint);
+                }
                 let meters = 2.0 * std::f64::consts::PI * geo::R * lat.cos() / (n * 256.0) * 60.0;
                 let a = Pos2::new(center.x - 30.0, rect.bottom() - 26.0);
                 painter.line_segment([a, a + Vec2::new(60.0, 0.0)], Stroke::new(4.0, Color32::BLACK));

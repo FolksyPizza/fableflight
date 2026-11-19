@@ -100,6 +100,8 @@ enum PauseAct {
     Resume,
     SaveFlight(usize),
     Refuel,
+    MarkFuel,
+    ClearFuelMarker,
     Respawn,
     GoTo,
     FlyTo(f64, f64, &'static str),
@@ -924,12 +926,19 @@ impl Loading {
         let lead = if cockpit { 18.0 * smooth((t - 0.46) / 0.23) * (1.0 - smooth((t - 0.74) / 0.26)) } else { 0.0 };
         let pos = vertical * (eye.length() + height) + forward * lead;
         let focus = eye + forward * if cockpit { 65.0 } else { 24.0 };
-        let look = (focus - pos).normalize_or_zero();
-        let up_blend = up.lerp(north, 1.0 - smooth((t - 0.20) / 0.46)).normalize_or_zero();
-        let target = if look == DVec3::ZERO || up_blend == DVec3::ZERO { orientation(forward, up) } else { orientation(look, up_blend) };
+        let look = (focus - pos).try_normalize().unwrap_or(forward);
         let overhead = orientation(-vertical, north);
-        let closing = overhead.slerp(target, smooth((t - 0.15) / 0.47));
-        let attitude = closing.slerp(orientation(forward, up), smooth((t - 0.66) / 0.30));
+        // Turn the map onto the flight heading first. The tilt then keeps a
+        // stable horizon even when the runway points south or the camera
+        // looks almost straight down.
+        let right = forward.cross(vertical).try_normalize().unwrap_or_else(|| geo::enu(vertical).0);
+        let (start_east, start_north, _) = geo::enu(self.eye);
+        let heading = forward.dot(start_east).atan2(forward.dot(start_north));
+        let turn = DQuat::from_axis_angle(vertical, -heading * smooth((t - 0.08) / 0.29));
+        let pan = turn * overhead;
+        let target = orientation(look, right.cross(look));
+        let closing = pan.slerp(target, smooth((t - 0.24) / 0.42));
+        let attitude = closing.slerp(orientation(forward, up), smooth((t - 0.67) / 0.30));
         (pos, attitude * DVec3::NEG_Z, attitude * DVec3::Y)
     }
 }
@@ -953,6 +962,28 @@ mod departure_tests {
         }
         let (p, dir, _) = load.camera(0.55, eye, north, up, false);
         assert!(dir.dot((eye + north * 24.0 - p).normalize()) > 0.9);
+    }
+
+    #[test]
+    fn descent_turn_is_continuous_at_all_headings() {
+        let spawn = geo::lla_to_pos(0.65, -2.12, 700.0);
+        let (east, north, up) = geo::enu(spawn);
+        let load = Loading::new(spawn + up * 7_500.0);
+        for heading in 0..24 {
+            let angle = f64::from(heading) * std::f64::consts::TAU / 24.0;
+            let forward = east * angle.sin() + north * angle.cos();
+            for cockpit in [false, true] {
+                let eye = spawn + up * 1.5 - forward * if cockpit { 0.0 } else { 16.0 };
+                let mut previous = load.camera(0.0, eye, forward, up, cockpit);
+                for i in 1..=240 {
+                    let pose = load.camera(i as f64 / 240.0, eye, forward, up, cockpit);
+                    assert!(pose.1.dot(previous.1) > 0.99 && pose.2.dot(previous.2) > 0.99, "heading {heading}, cockpit {cockpit}, frame {i}");
+                    previous = pose;
+                }
+                assert!(previous.0.distance(eye) < 1e-6);
+                assert!(previous.1.dot(forward) > 0.99999 && previous.2.dot(up) > 0.99999);
+            }
+        }
     }
 
     #[test]
@@ -1222,6 +1253,7 @@ struct Game {
     save_message: Option<String>,
     flight_plan: flightplan::FlightPlan,
     taxi_route: Vec<(f64, f64)>,
+    fuel_marker: Option<(f64, f64)>,
     ap_off_t: f64,
     ap_script: Vec<(f64, String)>,
     /// gamepad input for the menus: key events for the next UI pass, a focus
@@ -1565,7 +1597,7 @@ impl Game {
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { prefs.cam_mode }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
             utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], gfx, gfx_applied: None, prev_plane: Mat4::IDENTITY, plane_box, lamps,
             frame: 0, fps: 60.0, fps_log: (args.fps_log, Instant::now(), 0, 0.0), paused: false, show_help: false, show_hud: !args.no_hud && prefs.show_hud, hud_cockpit: prefs.hud_cockpit, arcade: args.arcade || prefs.arcade, goto_open: false, goto_text: String::new(), goto_rx: None,
-            status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, stage_at: args.stage_at, engines: args.engines, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, pad_y: false, pad_y_combo: false, ap: autopilot::Autopilot::default(), runway_pilot: None, stability_assist: prefs.stability_assist, infinite_fuel: prefs.infinite_fuel, saved_flights: flight_save::FlightSave::load_all(), show_saved_flights: false, save_message: None, flight_plan: Default::default(), taxi_route: Vec::new(), ap_off_t: -100.0, ap_script: args.ap_script.clone(), cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
+            status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, stage_at: args.stage_at, engines: args.engines, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, pad_y: false, pad_y_combo: false, ap: autopilot::Autopilot::default(), runway_pilot: None, stability_assist: prefs.stability_assist, infinite_fuel: prefs.infinite_fuel, saved_flights: flight_save::FlightSave::load_all(), show_saved_flights: false, save_message: None, flight_plan: Default::default(), taxi_route: Vec::new(), fuel_marker: None, ap_off_t: -100.0, ap_script: args.ap_script.clone(), cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
             record: args.record.clone(), rec_audio: Vec::new(), rec_n: 0, rec_t0: Instant::now(), sound_on: prefs.sound_on, volume: prefs.volume, flight_tools_open: false, info_open: false, menu_hold: None, menu_hold_pending: false, info_page: menu::Page::Flight, pause_open: false, pause_page: menu::Page::Game, pause_at: args.pause_menu, settings_sec: args.settings.unwrap_or(settings_ui::Section::General), look_sens: prefs.look_sens, head: cockpit::Head::new(cy.to_radians(), cp), cockpit_fov: args.fov.unwrap_or(prefs.cockpit_fov).clamp(30.0, 90.0), head_live: false, warn: audio::Warn::default(), warn_t: [-10.0; 4],
             g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, quit: false,
@@ -1957,6 +1989,7 @@ impl Game {
         self.preflight = None;
         self.briefing_exit = None;
         self.taxi_route.clear();
+        self.fuel_marker = None;
         self.set_flight_tools(false);
         self.ap.disengage();
         self.runway_pilot = None;
@@ -2924,6 +2957,22 @@ impl Game {
             }
             Err(_) => self.menu_hold = None,
         }
+    }
+
+    fn mark_fuel_service(&mut self) {
+        let p = &self.plane;
+        self.fuel_marker = self.world.airfield_near(p.pos, 12_000.0).and_then(|field| {
+            let geo = &field.geo;
+            let here = geo.local(p.pos);
+            geo.nearest_fuel_service(here, self.spec.span).map(|p| geo.lla(p))
+        });
+        if self.fuel_marker.is_some() {
+            self.minimap.visible = true;
+            self.status = t!("Fuel parking marked on the map", "Stationnement carburant marqué sur la carte").into();
+        } else {
+            self.status = t!("No suitable fuel parking found at the nearby airport", "Aucun stationnement carburant adapté à l’aéroport proche").into();
+        }
+        self.status_until = self.real + 6.0;
     }
 
     fn can_refuel(&self) -> bool {
@@ -3904,6 +3953,7 @@ impl Game {
         self.flight_plan = Default::default();
         self.runway_pilot = None;
         self.taxi_route.clear();
+        self.fuel_marker = None;
         self.loading = None;
         self.departure_intro = None;
         self.menu.reset_globe(self.utc);
@@ -6857,6 +6907,24 @@ impl Game {
                                 }
                                 ui.add_space(6.0);
                             }
+                            if !self.crashed && p.spec.rocket().is_none() {
+                                ui.horizontal_wrapped(|ui| {
+                                    if self.fuel_marker.is_some() {
+                                        if ui.button(t!("Clear fuel marker", "Effacer le repère carburant")).clicked() {
+                                            *act = Some(PauseAct::ClearFuelMarker);
+                                        }
+                                    } else if ui.button(t!("Mark nearest fuel", "Marquer le carburant le plus proche")).clicked() {
+                                        *act = Some(PauseAct::MarkFuel);
+                                    }
+                                    if p.on_ground {
+                                        let fuel = ui.add_enabled(self.can_refuel(), egui::Button::new(t!("Refuel to full", "Faire le plein")));
+                                        if fuel.on_disabled_hover_text(t!("Park clear of the runway, set the parking brake and shut down the engine.", "Stationnez hors de la piste, serrez le frein de parc et coupez le moteur.")).clicked() {
+                                            *act = Some(PauseAct::Refuel);
+                                        }
+                                    }
+                                });
+                            }
+                            ui.add_space(5.0);
                             let p = &self.plane;
                             menu::heading(ui, t!("FLIGHT", "VOL"));
                             egui::Grid::new("info_fl").num_columns(2).spacing([14.0, 3.0]).show(ui, |ui| {
@@ -6933,12 +7001,6 @@ impl Game {
                             let on = p.running || p.starter_on;
                             if ui.button(if on { t!("Shut the engine down  F4", "Couper le moteur  F4") } else { t!("Start the engine  F4", "Démarrer le moteur  F4") }).clicked() {
                                 engine_btn = Some(!on);
-                            }
-                            if p.on_ground && p.spec.rocket().is_none() {
-                                let fuel = ui.add_enabled(self.can_refuel(), egui::Button::new(t!("Refuel to full", "Faire le plein")));
-                                if fuel.on_disabled_hover_text(t!("Park clear of the runway, set the parking brake and shut down the engine.", "Stationnez hors de la piste, serrez le frein de parc et coupez le moteur.")).clicked() {
-                                    *act = Some(PauseAct::Refuel);
-                                }
                             }
                             let report = p.dmg.report();
                             if self.crashed {
@@ -7680,12 +7742,12 @@ impl Game {
                     });
                 });
             }
-            if self.hud_on() && !self.pause_open && !self.show_help && !self.goto_open {
+            if (self.hud_on() || self.fuel_marker.is_some()) && !self.pause_open && !self.show_help && !self.goto_open {
                 if self.minimap.visible {
                     let horizontal = f.dot(e).hypot(f.dot(n));
                     let width = self.flight_view_width(ctx);
                     let taxi: &[(f64, f64)] = if self.plane.on_ground { &self.taxi_route } else { &[] };
-                    self.minimap.show(ctx, &self.src, lat, lon, (horizontal > 1e-5).then_some(hdg.to_radians()), width, landing_guide, taxi, &self.world);
+                    self.minimap.show(ctx, &self.src, lat, lon, (horizontal > 1e-5).then_some(hdg.to_radians()), width, landing_guide, taxi, self.fuel_marker, &self.world);
                 }
             }
             if self.show_help {
@@ -7757,7 +7819,10 @@ impl Game {
         match act {
             Some(PauseAct::Resume) => self.set_pause_menu(false),
             Some(PauseAct::SaveFlight(slot)) => self.save_flight(slot),
+            Some(PauseAct::MarkFuel) => self.mark_fuel_service(),
+            Some(PauseAct::ClearFuelMarker) => self.fuel_marker = None,
             Some(PauseAct::Refuel) if self.can_refuel() => {
+                self.fuel_marker = None;
                 self.plane.fuel = self.spec.fuel_kg;
                 self.status = t!("Fuel tanks full", "Réservoirs pleins").into();
                 self.status_until = self.real + 6.0;
