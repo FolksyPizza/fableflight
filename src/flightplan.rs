@@ -216,7 +216,7 @@ impl Game {
                 if ui.add_enabled(can_fly, egui::Button::new(t!("Arm ILS approach", "Armer l’approche ILS"))).clicked() {
                     self.arm_planned_ils(destination, false);
                 }
-                if ui.add_enabled(available && self.runway_pilot.is_none() && crate::pilot_assist::RunwayPilot::supported(&self.plane),
+                if ui.add_enabled(available && self.runway_pilot.is_none() && crate::pilot_assist::RunwayPilot::landing_supported(&self.plane),
                     egui::Button::new(if self.flight_plan.auto_ils.is_some() {
                         t!("Cancel automatic landing", "Annuler l’atterrissage automatique")
                     } else {
@@ -231,7 +231,7 @@ impl Game {
                     }
                 }
             });
-            ui.label(RichText::new(t!("Cessna 172RG · Engage on final or arm from a usable ILS.", "Cessna 172RG · Engagez en finale ou armez depuis un ILS utilisable."))
+            ui.label(RichText::new(t!("Cessna 172RG / Robin DR400 · Engage on final or arm from a usable ILS.", "Cessna 172RG / Robin DR400 · Engagez en finale ou armez depuis un ILS utilisable."))
                 .font(menu::caption()).color(menu::DIM));
         }
         if let Some(message) = &self.flight_plan.message {

@@ -1,4 +1,4 @@
-//! Runway automation for the simulator's Cessna 172RG.
+//! Automatic takeoff and landing for supported light aircraft.
 use crate::{aircraft, airports, autopilot::State, geo, plane::{Controls, Plane}};
 use glam::DVec3;
 
@@ -77,14 +77,17 @@ pub enum Output {
 }
 
 impl RunwayPilot {
-    pub fn supported(plane: &Plane) -> bool {
-        std::ptr::eq(plane.spec, &aircraft::c172::SPEC) && plane.running && !plane.wrecked()
+    pub fn landing_supported(plane: &Plane) -> bool {
+        (std::ptr::eq(plane.spec, &aircraft::c172::SPEC)
+            || std::ptr::eq(plane.spec, &aircraft::dr400::SPEC))
+            && plane.running && !plane.wrecked()
     }
 
     pub fn takeoff(runway: Runway, plane: &Plane) -> Option<Self> {
         let s = State::of(plane);
         let (along, across) = runway.local(plane.pos);
-        (Self::supported(plane) && plane.on_ground && !plane.hold
+        (std::ptr::eq(plane.spec, &aircraft::c172::SPEC)
+            && Self::landing_supported(plane) && plane.on_ground && !plane.hold
             && plane.gear >= 0.99 && s.gs < 2.0
             && (0.0..=runway.length * 0.15).contains(&along)
             && across.abs() < runway.half_width * 0.30
@@ -98,7 +101,7 @@ impl RunwayPilot {
         let h = runway.height(plane);
         let glide_height = (180.0 - along) * GLIDE;
         let speed = plane.spec.approach.0;
-        (Self::supported(plane) && !plane.on_ground && !plane.hold && !plane.stalled
+        (Self::landing_supported(plane) && !plane.on_ground && !plane.hold && !plane.stalled
             && (-6_500.0..=-750.0).contains(&along)
             && (h - glide_height).abs() < (glide_height * 0.35).clamp(22.0, 70.0)
             && across.abs() < (-along * 0.065).max(35.0)
@@ -110,7 +113,7 @@ impl RunwayPilot {
     }
 
     pub fn step(&mut self, plane: &Plane, pilot: &Controls, dt: f64) -> Output {
-        if !Self::supported(plane) || plane.stalled || manual_input(pilot) {
+        if !Self::landing_supported(plane) || plane.stalled || manual_input(pilot) {
             return Output::Cancelled;
         }
         let r = self.runway;
@@ -249,6 +252,32 @@ mod tests {
     }
 
     #[test]
+    fn dr400_automatic_landing_stops_on_runway() {
+        let world = test_world();
+        let runway = Runway::new(geo::lla_to_pos(0.6, -0.5, 0.0), 0.0, 0.0, 2_100.0, 45.0);
+        let (lat, lon, _) = geo::pos_to_lla(runway.threshold - runway.forward * 2_400.0);
+        let spec = &aircraft::dr400::SPEC;
+        let speed = spec.approach.0;
+        let mut plane = Plane::spawn(spec, lat, lon, 2_580.0 * GLIDE + 1.0, 0.0, speed);
+        plane.configure(spec.approach.1, true, speed * GLIDE);
+        let mut pilot = RunwayPilot::land(runway, &plane).expect("stabilized DR400 final");
+        let dt = 1.0 / 180.0;
+        for _ in 0..(135 * 180) {
+            match pilot.step(&plane, &Controls::default(), dt) {
+                Output::Control(c) => assert!(plane.step(dt, &c, &world).is_none(), "{:?}", plane.notes),
+                Output::Stopped => {
+                    let (along, across) = runway.local(plane.pos);
+                    assert!((0.0..runway.length).contains(&along) && across.abs() < runway.half_width);
+                    return;
+                }
+                _ => break,
+            }
+        }
+        panic!("did not stop in {:?} at {:?}, height {:.1}, state {:?}", pilot.phase,
+            runway.local(plane.pos), runway.height(&plane), State::of(&plane));
+    }
+
+    #[test]
     fn automatic_takeoff_climbs_and_automatic_landing_stops_on_runway() {
         let world = test_world();
         let r = Runway::new(geo::lla_to_pos(0.6, -0.5, 0.0), 0.0, 0.0, 2_100.0, 45.0);
@@ -329,7 +358,7 @@ impl crate::Game {
         });
         let altitude = self.plane.pos.length() - geo::R - f64::from(apt.elev);
         if self.ap.lat != crate::autopilot::Lat::Apr || !matching_ils || manual_input(input)
-            || !RunwayPilot::supported(&self.plane) || altitude < 25.0
+            || !RunwayPilot::landing_supported(&self.plane) || altitude < 25.0
         {
             self.flight_plan.auto_ils = None;
             self.flight_plan.message = Some(crate::t!("Automatic landing disarmed", "Atterrissage automatique désarmé").into());
