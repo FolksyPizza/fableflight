@@ -80,7 +80,8 @@ struct Globals {
   // 1 / window width and height (what the tonemap writes).
   quality: vec4f,
   // Graphics settings: building level-of-detail distance factor, tree
-  // impostor distance factor, how far out trees are drawn (m). 0 = High.
+  // impostor distance factor, tree draw distance (m), and loaded scenery
+  // visibility during departure (0 = satellite preview, 1 = scenery).
   detail: vec4f,
   // The rain deck (nimbostratus, weather.rs deck_globals): centre of its area
   // (cloud space, km on the sphere) + amount 0..1 (0 = none); tangent axis +

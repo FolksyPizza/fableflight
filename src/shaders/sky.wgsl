@@ -89,7 +89,7 @@ fn sky_color(rd: vec3f, jit: f32) -> vec3f {
   let gnd = ray_sphere(oc, rd, G.planet.w);
   // Behind the staged scenery, keep the clear satellite view of the
   // ground visible instead of covering it in the flight atmosphere.
-  if (G.start.x < 0.0 && G.detail.w < 1.0 && gnd.x > 0.0) {
+  if (G.detail.w < 1.0 && gnd.x > 0.0) {
     // The overhead preview should hold still even on low temporal quality.
     return globe_sky(rd, 0.5);
   }
@@ -299,7 +299,17 @@ fn globe_sky(rd: vec3f, jit: f32) -> vec3f {
     let light = globe_amb(mu) + globe_sun(mu, 0.0) * (max(mu, 0.0) / PI);
     let cities = vec3f(1.0, 0.68, 0.40) * (texel.a * night_at(n) * G.sun_dir.w * 0.25);
     let albedo = texel.rgb * light + cities;
-    return globe_surface(p, rd, albedo, water, jit);
+    let surface = globe_surface(p, rd, albedo, water, jit);
+    if (G.detail.w < 1.0) {
+      // Lift the night-side map just enough to show the coast and terrain
+      // while loading. Normalize the lift for the current camera exposure
+      // so adjusting from orbital to local exposure cannot hide the map.
+      let night = 1.0 - smoothstep(-0.12, 0.08, mu);
+      let relief = mix(texel.rgb, vec3f(0.012, 0.025, 0.046), water);
+      return surface + relief * vec3f(0.60, 0.78, 1.0)
+        * (night * (1.0 - G.detail.w) * 0.32 / max(G.time.z, 0.1));
+    }
+    return surface;
   }
   var col = space(rd) + moon_disc(rd);
   let top = ray_sphere(oc, rd, G.planet.w + ATM_H);

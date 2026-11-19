@@ -4021,12 +4021,30 @@ impl Game {
         self.name_rx = None;
     }
 
+    /// Keep the displayed local time and the sun's UTC in sync through launch.
+    fn sync_planner_clock(&mut self) {
+        let lon = self.menu.pick.map(|p| p.1).unwrap_or(self.menu.lon);
+        if !self.wx.real_time && self.menu_time_seen.0.is_finite()
+            && (self.menu.hour, self.doy) != self.menu_time_seen
+        {
+            self.menu_time_set = true;
+        }
+        if self.wx.real_time || !self.menu_time_set {
+            (self.utc, self.doy) = weather::real_clock();
+            self.menu.hour = (self.utc + lon / 15.0).rem_euclid(24.0);
+        } else {
+            self.utc = (self.menu.hour - lon / 15.0).rem_euclid(24.0);
+        }
+        self.menu_time_seen = (self.menu.hour, self.doy);
+    }
+
     /// Menu: take off at the chosen spot (once its ground height is known).
     fn begin(&mut self) {
         let Some((lat, lon)) = self.menu.pick else { return };
         if self.menu.starting {
             return;
         }
+        self.sync_planner_clock();
         self.menu.press = None;
         self.name_rx = None;
         self.goto_rx = None;
@@ -5188,26 +5206,7 @@ impl Game {
                 let dir = if side.length() > 0.2 { side.normalize() } else { geo::enu(cam).1 };
                 (cam, dir, up)
             };
-            // The globe's sun is where it is now (the terminator, the night
-            // side's lights), unless the start time has been set by hand: then
-            // that time at the chosen spot (or under the camera).
-            let lon = self.menu.pick.map(|p| p.1).unwrap_or(self.menu.lon);
-            if self.wx.real_time {
-                // Real time: the start time is the time now at the chosen spot.
-                let (utc, doy) = weather::real_clock();
-                self.menu.hour = (utc + lon / 15.0).rem_euclid(24.0);
-                (self.utc, self.doy) = (utc, doy);
-            } else {
-                if self.menu_time_seen.0.is_finite() && (self.menu.hour, self.doy) != self.menu_time_seen {
-                    self.menu_time_set = true;
-                }
-                if self.menu_time_set {
-                    self.utc = (self.menu.hour - lon / 15.0).rem_euclid(24.0);
-                } else {
-                    (self.utc, self.doy) = weather::real_clock();
-                }
-            }
-            self.menu_time_seen = (self.menu.hour, self.doy);
+            self.sync_planner_clock();
             self.cam_pos = cam;
         } else if self.crashed {
             let cr = self.crash.as_ref().unwrap();
@@ -5400,7 +5399,11 @@ impl Game {
         let vp_jit = Mat4::from_translation(jitter.extend(0.0)) * vp;
         let frustum = world::Frustum::new(DMat4::from_cols_array(&vp.to_cols_array().map(|v| v as f64)));
         let waiting_above = departing && self.loading.is_none_or(|l| l.descent.is_none());
-        let distant_intro = self.departure_intro.is_some() && calt >= 800_000.0;
+        // Keep the globe shading active all the way through the intro. Its
+        // altitude blend must match the exposure on both sides of orbit.
+        let intro = self.departure_intro.is_some();
+        let globe_view = map_view || intro;
+        let distant_intro = intro && calt >= 800_000.0;
         let orbit = distant_intro || map_view && (self.menu.screen != menu::Screen::Fly || calt >= 800_000.0);
         let focus_abs = if in_menu { cam } else if self.crashed { self.crash.as_ref().unwrap().site } else { self.plane.pos };
         if orbit {
@@ -5488,7 +5491,7 @@ impl Game {
         self.storm_adapt += (shade * day - self.storm_adapt) * (dt_real as f32 * 0.4).min(1.0);
         // The start screen's globe from orbit is exposed for its day side
         // (common.wgsl `globe_k`), wherever the night falls on it.
-        let globe = if map_view || self.departure_intro.is_some() { let k = ((calt as f32 - 150e3) / 650e3).clamp(0.0, 1.0); k * k * (3.0 - 2.0 * k) } else { 0.0 };
+        let globe = if globe_view { let k = ((calt as f32 - 150e3) / 650e3).clamp(0.0, 1.0); k * k * (3.0 - 2.0 * k) } else { 0.0 };
         let exposure = (6.0f32.ln() + (GLOBE_EXPOSURE.ln() - 6.0f32.ln()) * globe + (0.5f32.ln() - 6.0f32.ln()) * day * (1.0 - globe)).exp() * if cockpit_view && !self.crashed && !in_menu { 2f32.powf(self.head.adapt) } else { 1.0 } * 2f32.powf(1.3 * self.storm_adapt);
         let v4 = |v: DVec3, w: f64| [v.x as f32, v.y as f32, v.z as f32, w as f32];
         let cam_right = dir.cross(upv).normalize();
@@ -5577,7 +5580,7 @@ impl Game {
             shore: [0.0; 4],
             foam: [[0.0; 4]; 16],
             // (yzw: the rain, how wet the windows are, and the airspeed over them in kt; plane.wgsl rain_water)
-            start: [if map_view || distant_intro { 1.0 } else { departure_visibility - 1.0 }, self.wx.rain, self.glass.wet, (self.plane.ias() * 1.94384) as f32],
+            start: [if globe_view { 1.0 } else { departure_visibility - 1.0 }, self.wx.rain, self.glass.wet, (self.plane.ias() * 1.94384) as f32],
             stormfx: [0.0; 4],
             flash: [[0.0; 4]; 2 * storm::MAX_FLASHES],
             rain: [[0.0; 4]; 2],
