@@ -7,6 +7,7 @@ mod audio;
 mod autopilot;
 mod buildings;
 mod aircraft;
+mod aircraft_preview;
 mod cockpit;
 mod copilot;
 mod cars;
@@ -1147,6 +1148,7 @@ struct Game {
     gm_logo: Option<egui::TextureHandle>,
     /// the start screen's aircraft pictures (by index into `aircraft::list()`), once shown
     stills: std::collections::HashMap<usize, egui::TextureHandle>,
+    aircraft_preview: Option<aircraft_preview::Preview>,
     /// the aircraft being flown, and its model
     spec: &'static aircraft::Spec,
     model: airframe::Model,
@@ -1617,7 +1619,7 @@ impl Game {
         let cockpit_controls = aircraft::cockpit_controls(spec, &model.pieces);
         let pit_blocks = cockpit::blockers(&model.pieces);
         let mut g = Self {
-            gkey: src.google.key(), gkey_show: false, gm_logo: None, stills: std::collections::HashMap::new(), window, r, world, src, spec, model, piece_mesh, group_mesh, piece_cut, piece_inner, group_pivots, hangar: Vec::new(), building: Vec::new(), crashed: false, crash: None, crash_real: 0.0, collision_mode: prefs.collision_mode,
+            gkey: src.google.key(), gkey_show: false, gm_logo: None, stills: std::collections::HashMap::new(), aircraft_preview: None, window, r, world, src, spec, model, piece_mesh, group_mesh, piece_cut, piece_inner, group_pivots, hangar: Vec::new(), building: Vec::new(), crashed: false, crash: None, crash_real: 0.0, collision_mode: prefs.collision_mode,
             collision_override: args.collision_override.or(args.crash_at.map(|_| settings::CollisionMode::Detailed)),
             flight_ended: None, egui_ctx, egui_state, keys: HashSet::new(), drag: false, lean_drag: None, last_cursor: None,
             minimap: minimap::Minimap::new(&prefs),
@@ -4916,6 +4918,9 @@ impl Game {
     }
 
     fn frame(&mut self) {
+        if self.mode != Mode::Menu || self.menu.screen != menu::Screen::Aircraft || self.menu.air_tab != hangar_ui::Tab::Mine {
+            self.aircraft_preview = None;
+        }
         self.keep_settings(false);
         if self.preflight.is_none() && !self.departing() {
             self.random_failures();

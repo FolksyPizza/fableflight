@@ -291,11 +291,25 @@ impl crate::Game {
 
     /// The aircraft screen's right side: the picture large, its name, a line
     /// on it, its numbers, and Select. Some(true): Select was pressed.
-    fn aircraft_detail(&mut self, ui: &mut egui::Ui, spec: &Spec, tex: &egui::TextureHandle, chosen: bool, h: f32) -> Option<bool> {
+    fn aircraft_detail(&mut self, ui: &mut egui::Ui, spec: &'static Spec, tex: &egui::TextureHandle, chosen: bool, h: f32) -> Option<bool> {
         let w = ui.available_width();
         // The picture on a soft lit backdrop, no taller than about half the window.
         let ph = (w * 392.0 / 680.0).min((h * 0.5).max(220.0));
-        let (stage, _) = ui.allocate_exact_size(egui::vec2(w, ph), egui::Sense::hover());
+        let sense = if spec.ext.is_some() { egui::Sense::drag() } else { egui::Sense::hover() };
+        let (stage, orbit) = ui.allocate_exact_size(egui::vec2(w, ph), sense);
+        let mut image = tex;
+        if let Some(ext) = spec.ext {
+            if self.aircraft_preview.as_ref().is_none_or(|preview| !preview.matches(ext)) {
+                self.aircraft_preview = Some(crate::aircraft_preview::Preview::new(ext));
+            }
+            if let Some(loaded) = self.aircraft_preview.as_mut().and_then(|preview| preview.draw(ui.ctx(), orbit.drag_delta())) {
+                image = loaded;
+                orbit.on_hover_cursor(egui::CursorIcon::Grab)
+                    .on_hover_text(t!("Drag to rotate the aircraft", "Glisser pour faire tourner l’avion"));
+            }
+        } else {
+            self.aircraft_preview = None;
+        }
         {
             let p = ui.painter();
             let mut mesh = egui::Mesh::default();
@@ -317,7 +331,7 @@ impl crate::Game {
         }
         let iw = (ph * 680.0 / 392.0).min(w);
         let img = egui::Rect::from_center_size(stage.center(), egui::vec2(iw, iw * 392.0 / 680.0));
-        egui::Image::new(tex).paint_at(ui, img);
+        egui::Image::new(image).paint_at(ui, img);
         if spec.origin.is_some() {
             badge(ui.painter(), stage.left_top() + egui::vec2(14.0, 12.0), if spec.ext.is_some() { "FlightGear" } else { "JSBSim" });
         }
