@@ -1728,8 +1728,8 @@ const GLOBE_LO = 150000.0;
 const GLOBE_HI = 800000.0;
 fn globe_k() -> f32 { return select(0.0, smoothstep(GLOBE_LO, GLOBE_HI, G.up.w), G.start.x > 0.0); }
 
-// Shared by the bundled globe and the higher-resolution map tiles underneath
-// the departure camera. Return scene-linear colour for the current exposure.
+// Readable satellite fallback until the flight terrain covers the ground ray.
+// Return scene-linear colour for the current exposure.
 fn departure_map_color(img: vec3f, water: f32, normal: vec3f) -> vec3f {
   let mu = dot(normal, G.sun_dir.xyz);
   let daylight = smoothstep(-0.14, 0.55, mu);

@@ -129,6 +129,7 @@ pub enum Event {
     Bump(f32),
     /// tyres meeting the runway (sink rate, m/s)
     Touch(f32),
+    Footstep,
     /// gear locking up or down
     Clunk(f32),
     /// ploughing through a tree
@@ -1509,6 +1510,12 @@ impl Synth {
                     let v = Voice::new(0.28, pn, Bus::Mid).delay(k).noise(f0, f0 * 0.6, 3.5, 2.5 * s, 0.08).tone(62.0, 42.0, 0.45 * s, 0.09);
                     self.push(v);
                 }
+            }
+            Event::Footstep => {
+                let v = Voice::new(0.14, r.range(-0.16, 0.16), Bus::Mid)
+                    .tone(r.range(70.0, 105.0), 52.0, 0.22, 0.035)
+                    .noise(r.range(560.0, 1070.0), 450.0, 0.9, 0.27, 0.045);
+                self.push(v);
             }
             Event::Clunk(s) => {
                 let v = Voice::new(0.2, r.range(-0.2, 0.2), Bus::Struct).tone(88.0, 70.0, 0.4 * s, 0.05).noise(900.0, 700.0, 1.2, 1.0 * s, 0.012).strike(0.5 * s).res([r.range(600.0, 700.0), r.range(1350.0, 1500.0)], [10.0, 12.0], [0.08, 0.05]);

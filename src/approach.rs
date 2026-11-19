@@ -12,6 +12,40 @@ pub struct Guide {
     width: f64,
 }
 
+pub struct LandingPractice {
+    pub target: Guide,
+    length: f64,
+    half_width: f64,
+}
+
+impl LandingPractice {
+    pub fn new(field: &airports::Geo, runway: usize, end: usize) -> Self {
+        let r = &field.runways[runway];
+        Self {
+            target: Guide::new(field, runway, end),
+            length: f64::from(r.len - r.thr[end]),
+            half_width: f64::from(r.width) * 0.5,
+        }
+    }
+
+    pub fn report(&self, position: DVec3, velocity: DVec3, vertical_speed: f64) -> String {
+        let offset = position - self.target.threshold;
+        let along = offset.dot(self.target.direction);
+        let across = offset.dot(self.target.direction.cross(self.target.up)).abs();
+        let on_runway = (0.0..=self.length).contains(&along) && across <= self.half_width;
+        let ground_speed = (velocity - self.target.up * velocity.dot(self.target.up)).length();
+        let placement = if on_runway {
+            crate::t!("{:.0} m beyond threshold · {:.0} m off centerline",
+                "{:.0} m après le seuil · {:.0} m de l’axe", along, across)
+        } else {
+            crate::t!("Outside the selected runway", "Hors de la piste sélectionnée").to_owned()
+        };
+        crate::t!("{} · {:.0} kt · {:.0} ft/min descent · {}",
+            "{} · {:.0} kt · {:.0} pi/min en descente · {}",
+            self.target.name, ground_speed * 1.94384, (-vertical_speed * 196.85).max(0.0), placement)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

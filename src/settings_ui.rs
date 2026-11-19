@@ -468,7 +468,7 @@ impl Game {
                 });
             });
             row(ui, t!("Pilot assistance", "Assistance au pilotage"),
-                t!("Gently levels the wings and reduces nose-up pressure near a stall.", "Remet doucement les ailes à plat et réduit le cabré près du décrochage."), |ui| {
+                t!("Softens keyboard inputs, levels the wings and helps near a stall.", "Adoucit le clavier, remet les ailes à plat et aide près du décrochage."), |ui| {
                     menu::switch(ui, &mut self.stability_assist);
                 });
             row(ui, t!("Unlimited fuel", "Carburant illimité"),

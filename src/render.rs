@@ -1691,7 +1691,7 @@ impl Renderer {
         let earth = crate::sources::globe_image();
         let (gw, gh) = earth.dimensions();
         let rgba = crate::sources::NightLights::get().globe_rgba(earth);
-        let globe = upload_mips_rect(d, &queue, "Blue Marble", (gw, gh), wgpu::TextureFormat::Rgba8UnormSrgb, 4, &crate::sources::mip_chain_rect(rgba, gw as usize, gh as usize, 4));
+        let globe = upload_mips_rect(d, &queue, "Blue Marble", (gw, gh), wgpu::TextureFormat::Rgba8UnormSrgb, 4, &crate::sources::color_mip_chain(rgba, gw as usize, gh as usize));
         let no_mask = view(&make_tex(d, "no photo mask", 1, 1, 1, 1, PHOTO_MASK_FMT, rt));
         let make_bg0 = |sky: &wgpu::TextureView, trans: &wgpu::TextureView, ms: &wgpu::TextureView, sh: &wgpu::TextureView, vl: &wgpu::TextureView, pm: &wgpu::TextureView, cs: &wgpu::TextureView| {
             d.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2588,6 +2588,11 @@ impl Renderer {
             self.obj_fast_rx = Some((kind, rx));
         }
     }
+    pub(crate) fn departure_aircraft_ready(&mut self, kind: u32) -> bool {
+        self.want_obj_kind(kind);
+        kind >= 99 || self.obj_fast.as_ref().is_some_and(|pipeline| pipeline.kind == kind)
+    }
+
     fn mesh_gpu(&self, verts: &[PartVertex], idx: &[u32], bind: Option<std::sync::Arc<wgpu::BindGroup>>) -> MeshGpu {
         // (an empty piece, a hinge other pieces hang from, still gets a buffer: nothing is drawn from it)
         let pad = [PartVertex::zeroed()];

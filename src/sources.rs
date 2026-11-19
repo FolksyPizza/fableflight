@@ -787,11 +787,31 @@ pub struct TileData {
 }
 
 pub fn mip_chain(data: Vec<u8>, size: usize, ch: usize) -> Vec<Vec<u8>> {
-    mip_chain_rect(data, size, size, ch)
+    mip_chain_rect::<false>(data, size, size, ch)
 }
 
-pub fn mip_chain_rect(mut data: Vec<u8>, mut width: usize, mut height: usize, ch: usize) -> Vec<Vec<u8>> {
+/// Average satellite and globe RGB in linear light. Alpha stores a linear
+/// mask or light intensity and keeps its ordinary byte average.
+pub fn color_mip_chain(data: Vec<u8>, width: usize, height: usize) -> Vec<Vec<u8>> {
+    mip_chain_rect::<true>(data, width, height, 4)
+}
+
+fn mip_chain_rect<const COLOR: bool>(mut data: Vec<u8>, mut width: usize, mut height: usize, ch: usize) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
+    static FROM_SRGB: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    static TO_SRGB: std::sync::OnceLock<[u8; 4097]> = std::sync::OnceLock::new();
+    let color = COLOR.then(|| {
+        let decode = FROM_SRGB.get_or_init(|| std::array::from_fn(|i| {
+            let x = i as f32 / 255.0;
+            if x <= 0.04045 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) }
+        }));
+        let encode = TO_SRGB.get_or_init(|| std::array::from_fn(|i| {
+            let x = i as f32 / 4096.0;
+            let s = if x <= 0.0031308 { x * 12.92 } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 };
+            (s * 255.0).round() as u8
+        }));
+        (decode, encode)
+    });
     while width > 1 || height > 1 {
         let (w, h) = ((width / 2).max(1), (height / 2).max(1));
         let mut next = vec![0u8; w * h * ch];
@@ -802,8 +822,14 @@ pub fn mip_chain_rect(mut data: Vec<u8>, mut width: usize, mut height: usize, ch
                 let left = x * 2;
                 let right = (left + 1).min(width - 1);
                 for c in 0..ch {
-                    let s = |i: usize| data[i * ch + c] as u32;
-                    next[(y * w + x) * ch + c] = ((s(top + left) + s(top + right) + s(bottom + left) + s(bottom + right) + 2) / 4) as u8;
+                    let sample = |i: usize| data[i * ch + c] as usize;
+                    let values = [sample(top + left), sample(top + right), sample(bottom + left), sample(bottom + right)];
+                    next[(y * w + x) * ch + c] = if let Some((decode, encode)) = color.filter(|_| c < 3) {
+                        let sum = values.into_iter().map(|i| decode[i]).sum::<f32>();
+                        encode[((sum * 1024.0).round() as usize).min(4096)]
+                    } else {
+                        ((values.into_iter().sum::<usize>() + 2) / 4) as u8
+                    };
                 }
             }
         }
@@ -1464,7 +1490,7 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
         heights,
         water,
         sea,
-        imagery: mip_chain(img.into_raw(), img_size as usize, 4),
+        imagery: color_mip_chain(img.into_raw(), img_size as usize, img_size as usize),
         img_size,
         mask: mask_mips,
         lights: mip_chain(lights, MASK, 1),
@@ -1575,6 +1601,14 @@ mod night_lights_tests {
 #[cfg(test)]
 mod fallback_tests {
     use super::*;
+
+    #[test]
+    fn globe_and_terrain_color_mips_average_linear_light() {
+        let pixels = [0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 255, 255, 255, 255];
+        let coarse = color_mip_chain(pixels.to_vec(), 2, 2);
+        assert_eq!(coarse[1], [188, 188, 188, 128]);
+        assert_eq!(mip_chain(pixels.to_vec(), 2, 4)[1], [128; 4]);
+    }
 
     #[test]
     fn offline_globe_filter_smooths_pixels_and_wraps_the_dateline() {

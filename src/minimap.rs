@@ -177,6 +177,30 @@ impl Minimap {
             // Prefer the exact geometry used by the 3D airfield and approach guide.
             // Some database entries (including EBNM) have no endpoint coordinates.
             let loaded = world.airfield(id).filter(|field| !field.geo.runways.is_empty());
+            if let Some(field) = loaded
+                && self.zoom >= 14
+                && (field.geo.center - position).length() <= field.geo.radius as f64 + 4_000.0
+            {
+                let at = |point| {
+                    let (lat, lon) = field.geo.lla(point);
+                    project((lat.to_degrees(), lon.to_degrees()))
+                };
+                let pavement = Color32::from_rgb(152, 169, 182);
+                for apron in &field.geo.aprons {
+                    for ring in apron {
+                        let points: Vec<_> = ring.iter().copied().map(at).collect();
+                        if points.len() >= 3 && egui::Rect::from_points(&points).intersects(rect) {
+                            painter.add(egui::Shape::closed_line(points, Stroke::new(1.0, pavement)));
+                        }
+                    }
+                }
+                for (path, _) in &field.geo.taxiways {
+                    let points: Vec<_> = path.iter().copied().map(at).collect();
+                    if points.len() >= 2 && egui::Rect::from_points(&points).intersects(rect) {
+                        painter.add(egui::Shape::line(points, Stroke::new(1.0, Color32::from_rgb(205, 178, 105))));
+                    }
+                }
+            }
             let runways: Vec<_> = if let Some(field) = loaded {
                 field.geo.runways.iter().map(|r| {
                     let endpoints = [r.a, r.b].map(|p| {

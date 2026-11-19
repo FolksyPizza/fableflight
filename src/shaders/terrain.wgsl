@@ -755,13 +755,6 @@ fn city_glow(gq: vec2f, dens: f32, dcx: vec2f, dcy: vec2f, upn: vec3f) -> vec3f 
   let dcx = dpdx(gq) * GLOW_CELLS;
   let dcy = dpdy(gq) * GLOW_CELLS;
   let shore = smoothstep(0.5, 1.0, textureSampleLevel(t_mask, s_clamp, in.uv, 3.0).r);
-  // Keep satellite tiles visible while the detailed scenery is staging.
-  // Fade the terrain lighting and water back in at the existing reveal rate.
-  if (G.detail.w < 1.0 && ign(in.clip.xy) >= G.detail.w) {
-    let normal = normalize(in.P - G.planet.xyz);
-    let color = departure_map_color(img, select(0.0, 1.0, m.r > 0.5), normal);
-    return GOut(vec4f(color, 1.0), vec4f(normal, -2.0), 0.0);
-  }
   if (m.r > 0.5) {
     let wclass = round(m.g * 255.0 / 80.0);
     // Bathymetry is coarse (and missing in bays): never shallower than a plausible shore profile.

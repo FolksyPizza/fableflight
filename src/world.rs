@@ -891,7 +891,7 @@ impl World {
         }
     }
 
-    pub fn update(&mut self, r: &Renderer, cam: DVec3, fr: &Frustum, departure_views: &[(DVec3, Frustum)], descent: bool, airport: Option<u32>) {
+    pub fn update(&mut self, r: &Renderer, cam: DVec3, fr: &Frustum, departure_views: &[(DVec3, Frustum)], descent: bool, airport: Option<u32>, forward_buffer: Option<DVec3>) {
         self.frame += 1;
         let now = std::time::Instant::now();
         let real_dt = self.last_update.map(|t| (now - t).as_secs_f32().min(0.25)).unwrap_or(0.0);
@@ -980,11 +980,20 @@ impl World {
         }
         if self.buildings_on && !descent {
             self.scenery_candidates.clear();
-            Self::select_scenery(self.reach_k, cam, (clat, clon, calt, gh), None, &mut self.scenery_candidates);
+            Self::select_scenery(self.reach_k, cam, (clat, clon, calt, gh), None, 0.0, &mut self.scenery_candidates);
+            if let Some(lead) = forward_buffer.filter(|lead| lead.length_squared() >= 250.0_f64.powi(2)) {
+                // Look ahead on the local tangent plane. Keep this queue behind
+                // the ordinary ring so a fast aircraft cannot starve nearby tiles.
+                let up = cam.normalize();
+                let eye = cam + lead - up * lead.dot(up);
+                let (lat, lon, alt) = geo::pos_to_lla(eye);
+                let ground = self.terrain_ground(lat, lon).map_or(gh, |g| g.h);
+                Self::select_scenery(self.reach_k * 0.78, eye, (lat, lon, alt, ground), None, 4.0, &mut self.scenery_candidates);
+            }
             for (eye, view) in departure_views {
                 let (lat, lon, alt) = geo::pos_to_lla(*eye);
                 let ground = self.terrain_ground(lat, lon).map_or(0.0, |g| g.h);
-                Self::select_scenery(self.reach_k, *eye, (lat, lon, alt, ground), Some(view), &mut self.scenery_candidates);
+                Self::select_scenery(self.reach_k, *eye, (lat, lon, alt, ground), Some(view), 0.0, &mut self.scenery_candidates);
             }
             for (&id, &priority) in &self.scenery_candidates {
                 match self.builds.get_mut(&id) {
@@ -1086,7 +1095,7 @@ impl World {
 
     fn select_scenery(
         reach_factor: f64, eye: DVec3, (lat, lon, alt, ground): (f64, f64, f64, f64),
-        frustum: Option<&Frustum>, candidates: &mut HashMap<TileId, f32>,
+        frustum: Option<&Frustum>, priority_bias: f32, candidates: &mut HashMap<TileId, f32>,
     ) {
         let agl = (alt - ground).max(0.0);
         if agl >= 7000.0 || lat.abs() >= 1.45 {
@@ -1108,10 +1117,10 @@ impl World {
                 let (lat, lon) = id.lat_lon(0.5, 0.5);
                 let offset = geo::lla_to_pos(lat, lon, ground) - eye;
                 let distance = offset.length();
-                if distance > reach + width || frustum.is_some_and(|view| !view.sphere(offset, width + 600.0)) {
+                if distance > reach + width || frustum.is_some_and(|view| !view.sphere(offset, width + 1_200.0)) {
                     continue;
                 }
-                let priority = 0.8 + (distance / width) as f32 * 0.6;
+                let priority = priority_bias + 0.8 + (distance / width) as f32 * 0.6;
                 candidates.entry(id).and_modify(|p| *p = p.min(priority)).or_insert(priority);
             }
         }

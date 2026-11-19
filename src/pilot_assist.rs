@@ -203,6 +203,17 @@ pub fn manual_input(c: &Controls) -> bool {
         || c.brake_left.max(c.brake_right) > 0.12 || c.throttle != 0.0 || c.boost || c.reverse
 }
 
+/// Ramp digital keys before mixing in analog commands. Full deflection is
+/// still available, while a brief keyboard tap gives a small correction.
+pub fn smooth_keyboard(previous: [f64; 3], target: [f64; 3], dt: f64) -> [f64; 3] {
+    std::array::from_fn(|i| {
+        let delta = target[i] - previous[i];
+        let rate = if target[i] == 0.0 || target[i] * previous[i] < 0.0 { 8.0 } else { 4.5 };
+        let limit = dt.clamp(0.0, 0.05) * rate;
+        previous[i] + delta.clamp(-limit, limit)
+    })
+}
+
 pub fn stabilize(plane: &Plane, c: &mut Controls) {
     if plane.on_ground || plane.hold || plane.stalled || plane.spec.rocket().is_some() { return; }
     let s = State::of(plane);
@@ -225,6 +236,16 @@ mod tests {
         let mut world = crate::world::World::new(crate::sources::Loader::new(sources, 0), 14);
         world.flat = Some(0.0);
         world
+    }
+
+    #[test]
+    fn keyboard_taps_are_small_but_a_held_key_reaches_full_input() {
+        let tap = smooth_keyboard([0.0; 3], [1.0, 0.0, -1.0], 1.0 / 60.0);
+        assert!((0.02..0.10).contains(&tap[0]) && tap[2] == -tap[0]);
+        assert_eq!(smooth_keyboard(tap, [0.0; 3], 1.0 / 60.0), [0.0; 3]);
+        let mut input = tap;
+        for _ in 0..20 { input = smooth_keyboard(input, [1.0, 0.0, -1.0], 1.0 / 60.0); }
+        assert_eq!(input, [1.0, 0.0, -1.0]);
     }
 
     #[test]
