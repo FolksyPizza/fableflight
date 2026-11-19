@@ -42,6 +42,24 @@ pub struct Controls {
     pub throttle_set: Option<f64>,
 }
 
+/// An aircraft ploughing into a building after hitting its wall. It does not
+/// go up at the first touch of the nose: the wall gives, and the fuel goes up
+/// once the cabin and the wing tanks are in. How far in that happens depends
+/// on the building: a heavy one (big and tall, concrete) stops it sooner, a
+/// light one lets it further in, and each building differs a little (floor
+/// slabs, columns, where it hit). Estimates for the look, not crash data.
+#[derive(Clone, Copy, Debug)]
+struct Bury {
+    building: (geo::TileId, usize),
+    /// distance travelled since the wall (m) and where it goes up
+    gone: f64,
+    depth: f64,
+    /// fraction of its speed it keeps per metre in
+    keep_per_m: f64,
+    /// what the first touch was (for the cause)
+    cause: &'static str,
+}
+
 pub struct Impact {
     pub pos: DVec3,
     pub vel: DVec3,
@@ -223,6 +241,8 @@ pub struct Plane {
     wing_flex_v: [f64; 2],
     /// what made it go up in flames, once it has
     pub cause: &'static str,
+    /// going into a building: it ploughs on through the floors before it goes up
+    bury: Option<Bury>,
     /// a rocket (plane/rocket.rs): the stage it is flying on (0 the whole
     /// stack), which of that stage's engine groups is lit, a stage separation
     /// asked for, and its attitude hold's memory
@@ -359,6 +379,7 @@ impl Plane {
             wing_flex: [0.0; 2],
             wing_flex_v: [0.0; 2],
             cause: "",
+            bury: None,
             stage: 0,
             lit: 0,
             stage_cmd: false,
@@ -854,6 +875,29 @@ impl Plane {
     fn tail_z(&mut self) -> f32 {
         let [a, b] = self.spec.tail.break_z;
         self.rng.range(a, b)
+    }
+    /// Into the wall of a building, fast: start ploughing into it (see `Bury`).
+    fn start_bury(&mut self, building: (geo::TileId, usize), world: &World, cause: &'static str) {
+        if self.bury.is_some() {
+            return;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        building.hash(&mut h);
+        let jitter = (h.finish() % 10_000) as f64 / 10_000.0;
+        // The building's mass (as in main.rs: ~120 kg/m³ of built volume,
+        // a third of it structure) against the aircraft's.
+        let mb = world.footprint(building.0, building.1).map(|(base, top, area)| area.max(25.0) as f64 * (top - base).max(3.0) * 120.0 * 0.3).unwrap_or(2.0e6);
+        let heavy = mb / (mb + self.spec.mass); // 0 light .. 1 massive
+        // From a third of its length in (massive) to three quarters (light), ± a bit per building.
+        let frac = (0.75 - 0.4 * heavy + (jitter - 0.5) * 0.25).clamp(0.25, 0.85);
+        // Fuselage length from its contact points (nose to tail cone).
+        let zs = self.spec.contacts.iter().map(|c| c.0[2]).chain(self.spec.tail_pts.iter().map(|p| p[2]));
+        let (lo, hi) = zs.fold((0.0f64, 0.0f64), |(a, b), z| (a.min(z), b.max(z)));
+        let depth = ((hi - lo).max(4.0) * frac).max(1.5);
+        // Speed kept by the time it goes up: 85% (light) .. 55% (massive).
+        let keep = 0.85 - 0.3 * heavy;
+        self.bury = Some(Bury { building, gone: 0.0, depth, keep_per_m: keep.powf(1.0 / depth), cause });
     }
     /// Something hits hard enough to explode: anything still hanging off goes too.
     fn impact(&mut self, imp: Impact, cause: &'static str) -> Option<Impact> {
@@ -1782,6 +1826,21 @@ impl Plane {
         self.on_ground = false;
         // Nothing is solid for the first moments after a spawn: the terrain
         // under the aircraft is still a coarse guess until its tile arrives.
+        if let Some(mut b) = self.bury {
+            let ds = self.vel.length() * dt;
+            b.gone += ds;
+            self.vel *= b.keep_per_m.powf(ds);
+            self.omega *= 0.9f64.powf(dt * 60.0);
+            self.bury = Some(b);
+            // In deep enough, or stopped in it: it goes up there, where the
+            // aircraft now is (the middle of the fuselage, not the nose tip).
+            if b.gone >= b.depth || self.vel.length() < 12.0 {
+                self.bury = None;
+                let p = self.pos;
+                let imp = Impact { pos: p, vel: self.vel, water: false, ground_h: geo::pos_to_lla(p).2, building: Some(b.building) };
+                return self.impact(imp, b.cause);
+            }
+        }
         let reach = 60.0 + 2.0 * spec.b;
         let close = self.t > 1.5 && (ground.as_ref().map(|g| h - g.h < reach).unwrap_or(false) || world.building(lat, lon).is_some());
         self.brushes = (self.brushes - dt * 0.5).max(0.0);
@@ -1843,7 +1902,8 @@ impl Plane {
                         Part::Wing(s, st) => {
                             // A wing's root goes in with the cabin right behind it.
                             if st < self.sta(0.33) && sp > 28.0 {
-                                return self.impact(crash, "wing root into building");
+                                self.start_bury(building.unwrap(), world, "wing root into building");
+                                continue;
                             }
                             if self.cool[s] <= 0.0 {
                                 let into = (self.rng.range(0.1, 0.6) + (sp as f32 / 30.0).min(2.0) * self.rng.f()) * k;
@@ -1861,7 +1921,9 @@ impl Plane {
                             let z = self.tail_z();
                             self.snap_tail(z, "BUILDING");
                         }
-                        _ if sp > 18.0 => return self.impact(crash, "building"),
+                        _ if sp > 18.0 || self.bury.is_some() => {
+                            self.start_bury(building.unwrap(), world, "building");
+                        }
                         _ if !walled => {
                             // Taxiing into a wall: crumpled, stopped and pushed back off it.
                             walled = true;

@@ -5113,8 +5113,13 @@ impl Game {
                             let keep = self.spec.mass / (self.spec.mass + mb);
                             if keep > 0.55 {
                                 through = keep as f32;
-                                let (la, lo, _) = geo::pos_to_lla(imp.pos);
-                                imp.ground_h = self.world.ground(la, lo).map(|g| g.h).unwrap_or(base);
+                                // (the blast stays where the aircraft went up, up the
+                                // side of the house; only a low hit is at street level)
+                                let (la, lo, alt) = geo::pos_to_lla(imp.pos);
+                                let g = self.world.ground(la, lo).map(|g| g.h).unwrap_or(base);
+                                if alt - g < 6.0 {
+                                    imp.ground_h = g;
+                                }
                             }
                         }
                     }
@@ -5128,10 +5133,8 @@ impl Game {
                     if let Some((tile, idx)) = imp.building {
                         // The building that was hit comes down, and any shed or small house right beside it.
                         let (la, lo, alt) = geo::pos_to_lla(site);
-                        if through == 0.0 {
-                            if let Some(g) = self.world.ground(la, lo) {
-                                crash.set_lift(alt - g.h);
-                            }
+                        if let Some(g) = self.world.ground(la, lo) {
+                            crash.set_lift(alt - g.h);
                         }
                         let d = &self.plane.dmg;
                         let hit = destruct::Hitter { right: self.plane.right(), up: self.plane.up(), span: d.wing, shape: &self.spec.hole, full: self.spec.span, stab: d.stab, fin: d.fin };
@@ -5162,7 +5165,20 @@ impl Game {
                     self.crashed = true;
                     self.crash_real = self.real;
                     self.orbit = 0.0;
-                    self.cam_ang = None;
+                    // Watch from back along the way it came in: that air is
+                    // clear (it just flew through it), so the camera never
+                    // starts inside the building or behind it.
+                    {
+                        let (e, n, u) = geo::enu(site);
+                        let v = imp.vel - u * imp.vel.dot(u);
+                        let back = if v.length() > 1.0 { -v.normalize() } else { -self.plane.forward() };
+                        let a = back.dot(n).atan2(back.dot(e));
+                        self.cam_ang = Some(a);
+                        let dist = (70.0 + 34.0 * power as f64) * (self.crash.as_ref().map_or(1.0, |c| c.size) as f64).sqrt() + self.cam_dist;
+                        let horiz = e * a.cos() + n * a.sin();
+                        self.cam_pos = site + horiz * dist * 0.6 + u * (12.0 + dist * 0.15);
+                        self.cam_look = site;
+                    }
                     self.cam_clear_t = 0.0;
                     self.cam_rise = 0.0;
                     self.acc = 0.0;
@@ -5365,7 +5381,10 @@ impl Game {
         } else if self.crashed {
             let cr = self.crash.as_ref().unwrap();
             // After an impact up the side of a building, the wreck ends up in the street below.
-            let street = cr.site - cr.up * cr.lift;
+            // While the fire burns up at the hole (6 s, see `Crash::set_lift`),
+            // watch it there; then follow the wreck down to the street.
+            let down = { let x = ((cr.time - 5.0) / 4.0).clamp(0.0, 1.0); x * x * (3.0 - 2.0 * x) };
+            let street = cr.site - cr.up * (cr.lift * down as f64);
             let mut target = cr.debris.first().filter(|d| !d.sunk).map(|d| d.pos).unwrap_or(street) * 0.5 + street * 0.5 + cr.up * 6.0;
             // (an airliner's fireball is a few hundred metres across: further back)
             let mut dist = (70.0 + 34.0 * cr.power as f64) * (cr.size as f64).sqrt() + self.cam_dist;

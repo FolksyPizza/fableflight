@@ -213,7 +213,8 @@ impl Crash {
         let steep = (-vn / speed.max(1.0) as f64).clamp(0.0, 1.0) as f32;
         let tank_hit = plane.cause == "wing tank";
         let ignition_chance = crash_ignition_chance(fuel, 0.5 * speed * speed, steep, tank_hit);
-        let ignited = !water && fuel > 0.02 && rng.f() < ignition_chance;
+        // Flown into a building at speed, the tanks always burst and go up.
+        let ignited = !water && fuel > 0.02 && (imp.building.is_some() || rng.f() < ignition_chance);
         let fire_power = power * (0.35 + 0.65 * fuel);
         let carry = if water {
             // Water gives way, but it is no cushion: the downward part is
