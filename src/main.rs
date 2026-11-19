@@ -5001,11 +5001,12 @@ impl Game {
             };
             self.acc += dt;
             let h = 1.0 / 180.0;
+            let collision = self.collision_override.unwrap_or(self.collision_mode);
+            self.plane.detailed_collision = collision == settings::CollisionMode::Detailed;
             while self.acc >= h {
                 self.acc -= h;
                 let controls = self.runway_controls(&c, h);
                 let imp = self.plane.step(h, &controls, &self.world);
-                let collision = self.collision_override.unwrap_or(self.collision_mode);
                 if collision != settings::CollisionMode::Detailed {
                     let stopped_wreck = (self.plane.on_ground || self.plane.on_hull) && self.plane.wrecked();
                     if let Some(impact) = imp.as_ref() {

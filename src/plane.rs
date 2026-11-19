@@ -243,6 +243,7 @@ pub struct Plane {
     pub cause: &'static str,
     /// going into a building: it ploughs on through the floors before it goes up
     bury: Option<Bury>,
+    pub detailed_collision: bool,
     /// a rocket (plane/rocket.rs): the stage it is flying on (0 the whole
     /// stack), which of that stage's engine groups is lit, a stage separation
     /// asked for, and its attitude hold's memory
@@ -380,6 +381,7 @@ impl Plane {
             wing_flex_v: [0.0; 2],
             cause: "",
             bury: None,
+            detailed_collision: true,
             stage: 0,
             lit: 0,
             stage_cmd: false,
@@ -1902,6 +1904,9 @@ impl Plane {
                         Part::Wing(s, st) => {
                             // A wing's root goes in with the cabin right behind it.
                             if st < self.sta(0.33) && sp > 28.0 {
+                                if !self.detailed_collision {
+                                    return self.impact(crash, "wing root into building");
+                                }
                                 self.start_bury(building.unwrap(), world, "wing root into building");
                                 continue;
                             }
@@ -1922,6 +1927,9 @@ impl Plane {
                             self.snap_tail(z, "BUILDING");
                         }
                         _ if sp > 18.0 || self.bury.is_some() => {
+                            if !self.detailed_collision {
+                                return self.impact(crash, "building");
+                            }
                             self.start_bury(building.unwrap(), world, "building");
                         }
                         _ if !walled => {

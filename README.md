@@ -108,7 +108,7 @@ Choose **Final**, select a runway, and turn on **Landing practice**. The simulat
 
 ## Collisions and reset
 
-Press **R** during any flight to reset the aircraft in the air near your current location. Under **Settings → General → Flight rules → Collisions**, **Recover** is the default and puts the aircraft back into stable flight after a severe impact. **End flight** shows an immediate flight-ended screen with options to restart nearby or return to the planner. **Detailed damage** uses the full crash simulation. To try one setting for a single run, pass `--collision recover`, `--collision end-flight`, or `--collision detailed`.
+Press **R** during any flight to reset the aircraft in the air near your current location. Under **Settings → General → Flight rules → Collisions**, **Recover** is the default and puts the aircraft back into stable flight after a severe impact. **End flight** shows an immediate flight-ended screen with options to restart nearby or return to the planner. **Detailed damage** includes airframe deformation and a progressive impact when the aircraft hits a building at speed. To try one setting for a single run, pass `--collision recover`, `--collision end-flight`, or `--collision detailed`.
 
 # Arcade mode
 FableFlight is a simulator first: by default, the aircraft fly as they really do. **Arcade mode** (Settings › General, or `--arcade` for one run) turns on the game's fun features:
