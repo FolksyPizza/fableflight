@@ -170,7 +170,7 @@ impl Game {
         p.parking_brake = save.on_ground;
         self.utc = save.utc;
         self.doy = save.day;
-        self.menu_time_set = true;
+        self.manual_time_lon = None;
         self.wx.real_time = false;
         self.flight_plan.airports = save.route.iter().filter_map(|name| airports::Db::get().find(name)).collect();
         self.flight_plan.runway = save.arrival_runway;

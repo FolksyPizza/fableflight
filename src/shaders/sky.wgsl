@@ -104,11 +104,8 @@ fn sky_color(rd: vec3f, jit: f32) -> vec3f {
     let n = normalize(p);
     let mu = dot(n, sun);
     let mum = dot(n, G.moon.xyz);
-    var surface = vec3f(0.012, 0.035, 0.07);
-    if (G.start.x < 0.0) {
-      let texel = globe_texel(n, gnd.x).rgb;
-      surface = mix(texel, surface, globe_water(texel));
-    }
+    let texel = globe_texel(n, gnd.x).rgb;
+    let surface = mix(texel, vec3f(0.012, 0.035, 0.07), globe_water(texel));
     col += sc.T * surface * ((sun_trans(0.0, mu) * max(mu, 0.0) + 0.02) * G.sun_dir.w + moon_light(n, 0.0) * max(mum, 0.0)) / PI;
   } else {
     let cs = dot(rd, sun);

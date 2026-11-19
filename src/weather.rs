@@ -1001,7 +1001,7 @@ impl Weather {
         real_time_switch(ui, real_time);
         let free = !*real_time;
         egui::Grid::new("start_time").num_columns(2).min_col_width(92.0).spacing([10.0, 5.0]).show(ui, |ui| {
-            ui.label(t!("Local time", "Heure locale"));
+            ui.label(t!("Local solar time", "Heure solaire locale"));
             ui.add_enabled_ui(free, |ui| add(ui, Slider::new(hour, 0.0..=23.99).custom_formatter(|v, _| crate::menu::hhmm(v))));
             ui.end_row();
             ui.label("Date");
@@ -1128,11 +1128,32 @@ fn real_time_switch(ui: &mut egui::Ui, on: &mut bool) {
     ui.checkbox(on, t!("Real time (the sun where you are, now)", "Heure réelle (le soleil là où vous êtes, maintenant)"));
 }
 
+pub fn utc_at_longitude(local_hour: f64, lon_degrees: f64) -> f64 {
+    (local_hour - lon_degrees / 15.0).rem_euclid(24.0)
+}
+
+pub fn local_time_at_longitude(utc_hour: f64, lon_degrees: f64) -> f64 {
+    (utc_hour + lon_degrees / 15.0).rem_euclid(24.0)
+}
+
 /// The real time now: hours UTC and the day of the year (0 = 1 January,
 /// the 29th of February counted as the 28th), from the system clock.
 pub fn real_clock() -> (f64, f64) {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
     clock_at(secs)
+}
+
+#[cfg(test)]
+#[test]
+fn selected_solar_time_round_trips_across_midnight() {
+    assert_eq!(utc_at_longitude(22.0, -120.0), 6.0);
+    assert_eq!(utc_at_longitude(2.0, 120.0), 18.0);
+    for longitude in [-180.0, -73.87, 0.0, 151.2, 179.99] {
+        for local in [1.0, 8.0, 12.0, 19.5, 23.5] {
+            let utc = utc_at_longitude(local, longitude);
+            assert!((local_time_at_longitude(utc, longitude) - local).abs() < 1e-9);
+        }
+    }
 }
 
 fn clock_at(secs: f64) -> (f64, f64) {

@@ -1416,11 +1416,8 @@ struct Game {
     livewx: livewx::LiveWx,
     /// the real clouds on the start screen's globe
     gclouds: globeclouds::GlobeClouds,
-    /// the start time has been set by hand (the menu's Time sliders, or
-    /// --time/--day): the globe then shows that time instead of the real one
-    menu_time_set: bool,
-    /// the menu's local time and date as last seen (to notice them being moved)
-    menu_time_seen: (f64, f64),
+    /// Longitude anchoring a manual time when the globe has no selected start.
+    manual_time_lon: Option<f64>,
     /// joysticks, pedals and moved keys, and what was last saved of them
     binds: bind::Bindings,
     binds_stamp: String,
@@ -1605,7 +1602,12 @@ impl Game {
         menu::apply_theme(&egui_ctx);
         let egui_state = egui_winit::State::new(egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, Some(4096));
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
-        let doy = (secs / 86400.0) % 365.25;
+        let (real_utc, real_doy) = weather::real_clock();
+        let doy = args.day.unwrap_or(real_doy);
+        let utc = if set_time { weather::utc_at_longitude(args.hour, lon) } else { real_utc };
+        if !set_time {
+            menu.hour = weather::local_time_at_longitude(utc, menu.lon);
+        }
         let cam_pos = plane.pos - plane.forward() * spec.cam_dist;
         let weapons = weapons::Weapons::new(spec, &model.pieces);
         // What the anti-aliasing takes to be flying along with the camera:
@@ -1620,7 +1622,7 @@ impl Game {
             flight_ended: None, egui_ctx, egui_state, keys: HashSet::new(), drag: false, lean_drag: None, last_cursor: None,
             minimap: minimap::Minimap::new(&prefs),
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { prefs.cam_mode }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
-            utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], gfx, gfx_applied: None, prev_plane: Mat4::IDENTITY, plane_box, lamps,
+            utc, doy, wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], gfx, gfx_applied: None, prev_plane: Mat4::IDENTITY, plane_box, lamps,
             frame: 0, fps: 60.0, fps_log: (args.fps_log, Instant::now(), 0, 0.0), paused: false, show_help: false, show_hud: !args.no_hud && prefs.show_hud, hud_cockpit: prefs.hud_cockpit, arcade: args.arcade || prefs.arcade, goto_open: false, goto_text: String::new(), goto_rx: None,
             status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, stage_at: args.stage_at, engines: args.engines, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, pad_y: false, pad_y_combo: false, ap: autopilot::Autopilot::default(), runway_pilot: None, stability_assist: prefs.stability_assist, keyboard_assist_input: [0.0; 3], infinite_fuel: prefs.infinite_fuel, saved_flights: flight_save::FlightSave::load_all(), show_saved_flights: false, save_message: None, flight_plan: Default::default(), taxi_route: Vec::new(), landing_practice_enabled: false, landing_practice: None, landing_report: None, fuel_marker: None, ap_off_t: -100.0, ap_script: args.ap_script.clone(), cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
@@ -1645,8 +1647,7 @@ impl Game {
             pit_blocks,
             livewx: livewx::LiveWx::new(),
             gclouds: globeclouds::GlobeClouds::default(),
-            menu_time_set: set_time,
-            menu_time_seen: (f64::NAN, f64::NAN),
+            manual_time_lon: None,
             binds_stamp: String::new(),
             binds: bind::Bindings::load(),
             fail_random: false,
@@ -2143,7 +2144,10 @@ impl Game {
             |i| f64::from(airports::Db::get().apts[i as usize].elev),
         );
         let start_agl = if self.menu.airport.is_none() || self.menu.start == menu::Start::Overhead { self.menu.start_agl } else { 450.0 };
-        let survey = (ground + start_agl + 4_000.0).max(8_000.0);
+        // A wider offline shot keeps regional geography in frame when the
+        // bundled atlas is the only imagery available.
+        let floor = if self.src.fetch.offline { 13_000.0 } else { 8_000.0 };
+        let survey = (ground + start_agl + 4_000.0).max(floor);
         let height = (f64::from(self.wx.cloud_ceiling()) + 800.0).clamp(survey, survey + 3_500.0);
         geo::lla_to_pos(lat, lon, height)
     }
@@ -2206,9 +2210,17 @@ impl Game {
 
     fn airport_ready(&mut self, idx: u32, g: Option<Arc<airports::Geo>>, runway: Option<String>, approach: bool, keep_local: bool) {
         let a = &airports::Db::get().apts[idx as usize];
-        let local = if keep_local { (self.utc + geo::pos_to_lla(self.plane.pos).1.to_degrees() / 15.0).rem_euclid(24.0) } else { self.menu.hour };
-        self.utc = (local - a.lon / 15.0).rem_euclid(24.0);
         let from_planner = self.mode == Mode::Menu;
+        if from_planner {
+            self.sync_planner_clock();
+        } else {
+            let local = if keep_local {
+                weather::local_time_at_longitude(self.utc, geo::pos_to_lla(self.plane.pos).1.to_degrees())
+            } else {
+                self.menu.hour
+            };
+            self.utc = weather::utc_at_longitude(local, a.lon);
+        }
         self.mode = Mode::Fly;
         self.menu.starting = false;
         self.status_until = self.real + 12.0;
@@ -4026,8 +4038,8 @@ impl Game {
             self.restore_last_start();
         }
         let lon = self.menu.pick.map_or(self.menu.lon, |(_, lon)| lon);
-        self.menu.hour = (self.utc + lon / 15.0).rem_euclid(24.0);
-        self.menu_time_seen = (self.menu.hour, self.doy);
+        self.menu.hour = weather::local_time_at_longitude(self.utc, lon);
+        self.manual_time_lon = (!self.wx.real_time).then_some(lon);
         self.menu.starting = false;
         self.menu.screen = menu::Screen::Fly;
         self.mode = Mode::Menu;
@@ -4149,19 +4161,17 @@ impl Game {
 
     /// Keep the displayed local time and the sun's UTC in sync through launch.
     fn sync_planner_clock(&mut self) {
-        let lon = self.menu.pick.map(|p| p.1).unwrap_or(self.menu.lon);
-        if !self.wx.real_time && self.menu_time_seen.0.is_finite()
-            && (self.menu.hour, self.doy) != self.menu_time_seen
-        {
-            self.menu_time_set = true;
-        }
-        if self.wx.real_time || !self.menu_time_set {
+        let selected = self.menu.pick.map(|p| p.1);
+        if self.wx.real_time {
+            let longitude = selected.unwrap_or(self.menu.lon);
             (self.utc, self.doy) = weather::real_clock();
-            self.menu.hour = (self.utc + lon / 15.0).rem_euclid(24.0);
+            self.menu.hour = weather::local_time_at_longitude(self.utc, longitude);
+            self.manual_time_lon = None;
         } else {
-            self.utc = (self.menu.hour - lon / 15.0).rem_euclid(24.0);
+            let longitude = selected.or(self.manual_time_lon).unwrap_or(self.menu.lon);
+            self.manual_time_lon = Some(longitude);
+            self.utc = weather::utc_at_longitude(self.menu.hour, longitude);
         }
-        self.menu_time_seen = (self.menu.hour, self.doy);
     }
 
     /// Menu: take off at the chosen spot (once its ground height is known).
@@ -4862,7 +4872,7 @@ impl Game {
         if let Some(rx) = &self.start_rx {
             if let Ok((lat, lon, elev)) = rx.try_recv() {
                 self.start_rx = None;
-                self.utc = (self.menu.hour - lon / 15.0).rem_euclid(24.0);
+                self.sync_planner_clock();
                 self.respawn(lat.to_radians(), lon.to_radians(), elev + self.menu.start_agl, self.heading);
                 self.status = self.menu.pick_name.clone();
                 self.status_until = self.real + 10.0;
@@ -6569,7 +6579,12 @@ impl Game {
                         });
                         let when = format!("{} · {}", menu::hhmm(self.menu.hour), weather::date_label(self.doy));
                         menu::section(ui, "time", t!("Time", "Heure"), &when, false, |ui| {
+                            let before = (self.menu.hour, self.doy, self.wx.real_time);
                             weather::Weather::start_time(ui, &mut self.menu.hour, &mut self.doy, &mut self.wx.real_time);
+                            if before != (self.menu.hour, self.doy, self.wx.real_time) {
+                                self.manual_time_lon = self.menu.pick.map(|p| p.1).or(Some(self.menu.lon));
+                                self.sync_planner_clock();
+                            }
                         });
                         padui::follow_focus(ui);
                     });

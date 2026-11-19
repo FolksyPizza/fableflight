@@ -651,7 +651,12 @@ fn composite_sample(in: FsIn, z: f32, c0: vec4f, a0: vec4f, amb: f32) -> vec3f {
       // fewer steps on lighter presets, taa hides the coarser march.
       let q = max(G.quality.x, 1.0);
       let sc = atm_march(oc, rd, t0, t1, max(6, i32(12.0 / q)), fract(jit + G.time.w * 0.618034));
-      col = col * sc.T + sc.L + glow_march(rd, t1, max(4, i32(8.0 / q)), fract(jit + G.time.w * 0.381966));
+      // A vertical survey shot should show the land through the same air as
+      // flight. Keep most of the horizon haze and soften its veil looking down.
+      let nadir = smoothstep(0.55, 1.0, -dot(rd, G.up.xyz)) * smoothstep(2500.0, 9000.0, G.up.w);
+      let haze = 1.0 - 0.48 * nadir;
+      col = col * mix(vec3f(1.0), sc.T, haze) + sc.L * haze
+        + glow_march(rd, t1, max(4, i32(8.0 / q)), fract(jit + G.time.w * 0.381966));
     }
   }
   if (gk > 0.0) { col = mix(col, gc, gk); }
