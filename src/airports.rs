@@ -388,6 +388,10 @@ impl Graph {
     /// down a runway costs more than a taxiway, so traffic uses the taxiways
     /// where there are any.
     pub fn path(&self, from: u32, to: u32) -> Option<Vec<u32>> {
+        self.path_using(from, to, |_| true)
+    }
+
+    fn path_using(&self, from: u32, to: u32, allowed: impl Fn(&Edge) -> bool) -> Option<Vec<u32>> {
         let n = self.nodes.len();
         let mut dist = vec![f32::INFINITY; n];
         let mut prev = vec![u32::MAX; n];
@@ -403,6 +407,9 @@ impl Graph {
             }
             for &e in &self.nodes[u as usize].edges {
                 let ed = &self.edges[e as usize];
+                if !allowed(ed) {
+                    continue;
+                }
                 let v = self.other(e, u);
                 let nd = dist[u as usize] + ed.len * if ed.rwy.is_some() { 3.0 } else { 1.0 };
                 if nd < dist[v as usize] {
@@ -570,6 +577,36 @@ impl Geo {
             .map(|p| self.lla(p)).collect()
     }
 
+    /// Ground guidance between the aircraft and a fuel stop. A disconnected
+    /// taxi network or a necessary runway crossing leaves only the map pin.
+    pub fn taxi_to_fuel(&self, start: Vec2, stop: Vec2, wingspan: f32) -> Vec<(f64, f64)> {
+        let margin = wingspan * 0.5 + 3.0;
+        if start.distance(stop) < 8.0 || self.on_runway(start, margin).is_some()
+            || self.on_runway(stop, margin).is_some()
+        {
+            return Vec::new();
+        }
+        let point = |node: u32| self.graph.nodes[node as usize].p;
+        let clear = |a, b| self.runways.iter().all(|r| !segment_over_runway(r, a, b, margin));
+        let allowed = |edge: &Edge| edge.rwy.is_none() && clear(point(edge.a), point(edge.b));
+        let snap = |at: Vec2| {
+            self.graph.nodes.iter().enumerate()
+                .filter(|(_, node)| node.p.distance_squared(at) <= 35.0_f32.powi(2)
+                    && clear(at, node.p)
+                    && node.edges.iter().any(|&i| allowed(&self.graph.edges[i as usize])))
+                .min_by(|(_, a), (_, b)| a.p.distance_squared(at).total_cmp(&b.p.distance_squared(at)))
+                .map(|(i, _)| i as u32)
+        };
+        let Some((from, to)) = snap(start).zip(snap(stop)) else {
+            return Vec::new();
+        };
+        let Some(path) = self.graph.path_using(from, to, allowed) else {
+            return Vec::new();
+        };
+        std::iter::once(start).chain(path.into_iter().map(point)).chain(std::iter::once(stop))
+            .map(|p| self.lla(p)).collect()
+    }
+
     /// Latitude and longitude (radians) of a local point.
     pub fn lla(&self, p: Vec2) -> (f64, f64) {
         let (lat, lon, _) = geo::pos_to_lla(self.world(p, 0.0));
@@ -634,6 +671,33 @@ impl Geo {
             s > -margin && s < r.len + margin && x.abs() < r.width * 0.5 + margin
         })
     }
+}
+
+/// Clip a taxi segment to the runway rectangle in runway-local coordinates.
+fn segment_over_runway(runway: &Runway, a: Vec2, b: Vec2, margin: f32) -> bool {
+    let ((a_along, a_across), (b_along, b_across)) = (runway.local(a), runway.local(b));
+    let half_width = runway.width * 0.5 + margin;
+    let mut first = 0.0_f32;
+    let mut last = 1.0_f32;
+    for (start, end, lower, upper) in [
+        (a_along, b_along, -margin, runway.len + margin),
+        (a_across, b_across, -half_width, half_width),
+    ] {
+        let delta = end - start;
+        if delta.abs() < 1e-4 {
+            if start < lower || start > upper {
+                return false;
+            }
+        } else {
+            let (t1, t2) = ((lower - start) / delta, (upper - start) / delta);
+            first = first.max(t1.min(t2));
+            last = last.min(t1.max(t2));
+            if first > last {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn stand_size(wingspan: f32) -> u8 {
@@ -1320,6 +1384,37 @@ mod tests {
         assert_eq!(field.nearest_fuel_service(runway, 11.0), Some(near));
         assert_eq!(field.nearest_fuel_service(runway, 64.0), Some(far));
         assert!(!field.fuel_service(runway));
+    }
+
+    #[test]
+    fn fuel_taxi_route_takes_the_connected_detour_clear_of_runways() {
+        let src = Sources::new(crate::fetch::Fetcher::new(std::env::temp_dir(), true), String::new());
+        let mut field = build_geo(&src, Db::get().find("KSFO").unwrap()).unwrap();
+        field.runways.truncate(1);
+        let runway = &field.runways[0];
+        let side = right_of(runway.dir) * (runway.width * 0.5 + 25.0);
+        let back = runway.a - runway.dir * 35.0;
+        let center = runway.a + runway.dir * 65.0;
+        let start = center + side;
+        let stop = center - side;
+        let points = [start, back + side, back - side, stop];
+        field.graph.nodes = points.into_iter().map(|p| Node { p, edges: Vec::new() }).collect();
+        // The direct taxiway is tagged as a taxiway but crosses the runway.
+        let pairs = [(0, 3), (0, 1), (1, 2), (2, 3)];
+        field.graph.edges = pairs.into_iter().map(|(a, b)| Edge {
+            a, b, rwy: None, len: points[a as usize].distance(points[b as usize]),
+        }).collect();
+        for (i, (a, b)) in pairs.into_iter().enumerate() {
+            field.graph.nodes[a as usize].edges.push(i as u32);
+            field.graph.nodes[b as usize].edges.push(i as u32);
+        }
+        assert_eq!(field.graph.path(0, 3).unwrap(), [0, 3]);
+        let route = field.taxi_to_fuel(start, stop, 11.0);
+        assert!(route.contains(&field.lla(points[1])) && route.contains(&field.lla(points[2])));
+        assert!(field.taxi_to_fuel(center, stop, 11.0).is_empty());
+        field.graph.nodes[1].edges.retain(|&i| i != 2);
+        field.graph.nodes[2].edges.retain(|&i| i != 2);
+        assert!(field.taxi_to_fuel(start, stop, 11.0).is_empty());
     }
 
     #[test]

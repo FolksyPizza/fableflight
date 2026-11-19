@@ -1280,6 +1280,7 @@ struct Game {
     landing_practice: Option<approach::LandingPractice>,
     landing_report: Option<String>,
     fuel_marker: Option<(f64, f64)>,
+    fuel_taxi_route: Vec<(f64, f64)>,
     ap_off_t: f64,
     ap_script: Vec<(f64, String)>,
     /// gamepad input for the menus: key events for the next UI pass, a focus
@@ -1626,7 +1627,7 @@ impl Game {
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { prefs.cam_mode }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
             utc, doy, wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], gfx, gfx_applied: None, prev_plane: Mat4::IDENTITY, plane_box, lamps,
             frame: 0, fps: 60.0, fps_log: (args.fps_log, Instant::now(), 0, 0.0), paused: false, show_help: false, show_hud: !args.no_hud && prefs.show_hud, hud_cockpit: prefs.hud_cockpit, arcade: args.arcade || prefs.arcade, goto_open: false, goto_text: String::new(), goto_rx: None,
-            status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, stage_at: args.stage_at, engines: args.engines, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, pad_y: false, pad_y_combo: false, ap: autopilot::Autopilot::default(), runway_pilot: None, stability_assist: prefs.stability_assist, keyboard_assist_input: [0.0; 3], infinite_fuel: prefs.infinite_fuel, saved_flights: flight_save::FlightSave::load_all(), show_saved_flights: false, save_message: None, flight_plan: Default::default(), taxi_route: Vec::new(), landing_practice_enabled: false, landing_practice: None, landing_report: None, fuel_marker: None, ap_off_t: -100.0, ap_script: args.ap_script.clone(), cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
+            status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, stage_at: args.stage_at, engines: args.engines, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, pad_y: false, pad_y_combo: false, ap: autopilot::Autopilot::default(), runway_pilot: None, stability_assist: prefs.stability_assist, keyboard_assist_input: [0.0; 3], infinite_fuel: prefs.infinite_fuel, saved_flights: flight_save::FlightSave::load_all(), show_saved_flights: false, save_message: None, flight_plan: Default::default(), taxi_route: Vec::new(), landing_practice_enabled: false, landing_practice: None, landing_report: None, fuel_marker: None, fuel_taxi_route: Vec::new(), ap_off_t: -100.0, ap_script: args.ap_script.clone(), cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
             record: args.record.clone(), rec_audio: Vec::new(), rec_n: 0, rec_t0: Instant::now(), sound_on: prefs.sound_on, volume: prefs.volume, flight_tools_open: false, info_open: false, menu_hold: None, menu_hold_pending: false, info_page: menu::Page::Flight, pause_open: false, pause_page: menu::Page::Game, pause_at: args.pause_menu, settings_sec: args.settings.unwrap_or(settings_ui::Section::General), look_sens: prefs.look_sens, head: cockpit::Head::new(cy.to_radians(), cp), cockpit_fov: args.fov.unwrap_or(prefs.cockpit_fov).clamp(30.0, 90.0), head_live: false, warn: audio::Warn::default(), warn_t: [-10.0; 4],
             g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, quit: false,
@@ -2040,7 +2041,7 @@ impl Game {
         self.taxi_route.clear();
         self.landing_practice = None;
         self.landing_report = None;
-        self.fuel_marker = None;
+        self.clear_fuel_marker();
         self.set_flight_tools(false);
         self.ap.disengage();
         self.runway_pilot = None;
@@ -3061,19 +3062,35 @@ impl Game {
         }
     }
 
+    fn clear_fuel_marker(&mut self) {
+        self.fuel_marker = None;
+        self.fuel_taxi_route.clear();
+    }
+
     fn mark_fuel_service(&mut self) {
+        self.clear_fuel_marker();
         let p = &self.plane;
-        self.fuel_marker = self.world.airfield_near(p.pos, 12_000.0).and_then(|field| {
+        if let Some(field) = self.world.airfield_near(p.pos, 12_000.0) {
             let geo = &field.geo;
             let here = geo.local(p.pos);
-            geo.nearest_fuel_service(here, self.spec.span).map(|p| geo.lla(p))
-        });
-        if self.fuel_marker.is_some() {
-            self.minimap.visible = true;
-            self.status = t!("Fuel parking marked on the map", "Stationnement carburant marqué sur la carte").into();
-        } else {
-            self.status = t!("No suitable fuel parking found at the nearby airport", "Aucun stationnement carburant adapté à l’aéroport proche").into();
+            if let Some(stop) = geo.nearest_fuel_service(here, self.spec.span) {
+                self.fuel_marker = Some(geo.lla(stop));
+                if p.on_ground {
+                    self.fuel_taxi_route = geo.taxi_to_fuel(here, stop, self.spec.span);
+                }
+            }
         }
+
+        self.status = if self.fuel_marker.is_none() {
+            t!("No suitable fuel parking found at the nearby airport", "Aucun stationnement carburant adapté à l’aéroport proche")
+        } else {
+            self.minimap.visible = true;
+            if !self.fuel_taxi_route.is_empty() {
+                t!("Taxi route to fuel parking shown on the map", "Itinéraire de roulage vers le carburant affiché sur la carte")
+            } else {
+                t!("Fuel parking marked on the map", "Stationnement carburant marqué sur la carte")
+            }
+        }.into();
         self.status_until = self.real + 6.0;
     }
 
@@ -4145,7 +4162,7 @@ impl Game {
         self.taxi_route.clear();
         self.landing_practice = None;
         self.landing_report = None;
-        self.fuel_marker = None;
+        self.clear_fuel_marker();
         self.loading = None;
         self.departure_intro = None;
         self.menu.reset_globe(self.utc);
@@ -5684,6 +5701,13 @@ impl Game {
         }
         let scrape = if steps > 0 { (scrape_n as f32 / steps as f32 * 0.5).min(1.0) } else { 0.0 };
         self.update_audio(cam, fire, in_menu, &c, dt, scrape);
+        if !self.plane.on_ground && (!self.taxi_route.is_empty() || !self.fuel_taxi_route.is_empty()) {
+            let (lat, lon, alt) = geo::pos_to_lla(self.plane.pos);
+            if self.world.terrain_ground(lat, lon).is_some_and(|ground| alt - ground.h > 35.0) {
+                self.taxi_route.clear();
+                self.fuel_taxi_route.clear();
+            }
+        }
 
         let flight_near = if cockpit_view && !self.crashed { 0.03f32 } else { 0.25f32 };
         let near = if in_menu { (calt * 0.02).clamp(0.4, 20_000.0) as f32 } else if loading {
@@ -8008,7 +8032,13 @@ impl Game {
                 if self.minimap.visible {
                     let horizontal = f.dot(e).hypot(f.dot(n));
                     let width = self.flight_view_width(ctx);
-                    let taxi: &[(f64, f64)] = if self.plane.on_ground { &self.taxi_route } else { &[] };
+                    let taxi: &[(f64, f64)] = if !self.plane.on_ground {
+                        &[]
+                    } else if self.fuel_marker.is_some() {
+                        &self.fuel_taxi_route
+                    } else {
+                        &self.taxi_route
+                    };
                     self.minimap.show(ctx, &self.src, lat, lon, (horizontal > 1e-5).then_some(hdg.to_radians()), width, landing_guide, taxi, self.fuel_marker, &self.world);
                 }
             }
@@ -8082,9 +8112,9 @@ impl Game {
             Some(PauseAct::Resume) => self.set_pause_menu(false),
             Some(PauseAct::SaveFlight(slot)) => self.save_flight(slot),
             Some(PauseAct::MarkFuel) => self.mark_fuel_service(),
-            Some(PauseAct::ClearFuelMarker) => self.fuel_marker = None,
+            Some(PauseAct::ClearFuelMarker) => self.clear_fuel_marker(),
             Some(PauseAct::Refuel) if self.can_refuel() => {
-                self.fuel_marker = None;
+                self.clear_fuel_marker();
                 self.plane.fuel = self.spec.fuel_kg;
                 self.status = t!("Fuel tanks full", "Réservoirs pleins").into();
                 self.status_until = self.real + 6.0;
