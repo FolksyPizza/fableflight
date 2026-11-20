@@ -63,7 +63,7 @@ struct Globals {
   // Churned white water where a crash went in, two each: centre (camera-relative)
   // + radius (m, 0 = none); strength 0..1, age (s), seed.
   foam: array<vec4f, 16>,
-  // The start screen: x = 1 while it shows (deep-space sky, no clouds).
+  // x: 2 for planner, 1 for orbit, -1..0 for weather reveal during descent.
   start: vec4f,
   // Storms close up (storm.rs): x bit mask of the cells near enough to darken
   // the ground (storm_shade), y rain at the camera 0..1, z lightning flashes
@@ -1322,7 +1322,8 @@ fn cloud_sun(pc: vec3f, hq: bool) -> CloudSun {
   let top = G.cs[3].y;
   let r = length(pc);
   let h = r - G.planet.w;
-  if (G.cs[4].w < 0.5 || G.start.x > 0.0 || h >= top) { return o; }
+  let weather = local_weather_visibility();
+  if (G.cs[4].w < 0.5 || weather <= 0.0 || h >= top) { return o; }
   // The sun the maps were drawn for (it differs from this frame's by a fraction
   // of a degree while the clock runs fast).
   let sun = G.cs[4].xyz;
@@ -1354,7 +1355,7 @@ fn cloud_sun(pc: vec3f, hq: bool) -> CloudSun {
   let f = sqrt(clamp((h - base) / (top - base), 0.0, 1.0)) * 3.0;
   let below = select(select(mix(v.y, v.z, f - 2.0), mix(v.x, v.y, f - 1.0), f < 2.0), v.x * f, f < 1.0);
   let od = max(v.z - below, 0.0);
-  let fade = smoothstep(0.85, 1.0, eo);
+  let fade = 1.0 - (1.0 - smoothstep(0.85, 1.0, eo)) * weather;
   let t = exp(-od);
   // (The forward-scattered glow fades out under really thick cloud: a storm.)
   o.vis = mix(t + (1.0 - t) * 0.22 / (1.0 + 0.12 * od + 0.01 * od * od), 1.0, fade);
@@ -1745,6 +1746,9 @@ fn photo_hides(P: vec3f, px: vec2f) -> bool {
 // scene (a picked spot seen close up), from GLOBE_HI the planet from orbit.
 const GLOBE_LO = 150000.0;
 const GLOBE_HI = 800000.0;
+fn local_weather_visibility() -> f32 {
+  return select(clamp(1.0 + G.start.x, 0.0, 1.0), 0.0, G.start.x > 0.0);
+}
 fn globe_k() -> f32 {
   let orbital = select(0.0, smoothstep(GLOBE_LO, GLOBE_HI, G.up.w), G.start.x > 0.0);
   let planner = select(0.0, 1.0 - G.detail.w, G.start.x > 1.5);
@@ -1841,7 +1845,7 @@ fn storm_shade(pp: vec3f) -> f32 {
     let lid = (1.0 - smoothstep(0.5, 1.05, rn)) * 0.55 * smoothstep(0.5, 0.8, sp.x);
     dark = max(dark, max(core, lid));
   }
-  return dark * (1.0 - smoothstep(G.cloud.y, G.cloud.y + 3000.0, h));
+  return dark * (1.0 - smoothstep(G.cloud.y, G.cloud.y + 3000.0, h)) * local_weather_visibility();
 }
 // Storm light: under a storm the sky light dims to a dull, faintly green grey.
 fn storm_light(amb: vec3f, dark: f32) -> vec3f {

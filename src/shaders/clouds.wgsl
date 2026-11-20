@@ -428,7 +428,7 @@ fn depth_match(a: f32, b: f32) -> f32 {
   o.dist.y = min(tscene * 0.001, SKY_KM);
   // No clouds at all (the globe on the start screen): even at zero cover the
   // noise leaves scattered puffs and cirrus veils.
-  if (G.start.x > 0.0) { return o; }
+  if (local_weather_visibility() <= 0.0) { return o; }
   let rg = G.planet.w;
   let oc = -G.planet.xyz;
   let base = G.cloud.y;
@@ -1043,7 +1043,7 @@ fn cloud_at(pos: vec2f, d: f32) -> vec4f {
   return (acc + best * 0.01) / (wsum + 0.01);
 }
 fn reveal_clouds(cloud: vec4f) -> vec4f {
-  let visible = clamp(1.0 + G.start.x, 0.0, 1.0);
+  let visible = local_weather_visibility();
   return mix(vec4f(0.0, 0.0, 0.0, 1.0), cloud, visible);
 }
 

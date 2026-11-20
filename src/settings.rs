@@ -14,7 +14,7 @@ pub enum CollisionMode {
 }
 
 impl CollisionMode {
-    pub const ALL: [Self; 3] = [Self::Recover, Self::EndFlight, Self::Detailed];
+    pub const PLAYER_MODES: [Self; 2] = [Self::Recover, Self::EndFlight];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -25,7 +25,7 @@ impl CollisionMode {
     }
 
     pub fn parse(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|mode| mode.key() == key)
+        [Self::Recover, Self::EndFlight, Self::Detailed].into_iter().find(|mode| mode.key() == key)
     }
 
     pub fn description(self) -> &'static str {
@@ -160,7 +160,10 @@ impl Settings {
             keyboard_rudder_fine: f("keyboard_rudder_fine", d.keyboard_rudder_fine).clamp(0.1, 0.75),
             remember_start: b("remember_start", d.remember_start),
             arcade: b("arcade", d.arcade),
-            collision_mode: j["collision_mode"].as_str().and_then(CollisionMode::parse).unwrap_or_default(),
+            collision_mode: match j["collision_mode"].as_str().and_then(CollisionMode::parse) {
+                Some(CollisionMode::Detailed) => CollisionMode::EndFlight,
+                mode => mode.unwrap_or_default(),
+            },
             minimap_plan: b("minimap_plan", d.minimap_plan),
             minimap_heading_up: b("minimap_heading_up", d.minimap_heading_up),
             minimap_size: f("minimap_size", d.minimap_size as f64).clamp(240.0, 640.0) as f32,
@@ -232,6 +235,9 @@ mod tests {
         let mut old = s.to_json();
         old.as_object_mut().unwrap().remove("remember_start");
         let fresh = Settings::from_json(&old);
+        let legacy_crashes = Settings::from_json(&serde_json::json!({"collision_mode": "detailed"}));
+        assert_eq!(legacy_crashes.collision_mode, CollisionMode::EndFlight);
+        assert_eq!(CollisionMode::parse("detailed"), Some(CollisionMode::Detailed));
         assert!(!fresh.remember_start && fresh.last.is_none());
         let legacy = Settings::from_json(&serde_json::json!({"minimap_size": 420}));
         assert_eq!((legacy.minimap_size, legacy.minimap_height), (420.0, 420.0));

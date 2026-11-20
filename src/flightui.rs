@@ -35,6 +35,31 @@ pub fn glass() -> egui::Frame {
     egui::Frame::new().fill(menu::GLASS).stroke(Stroke::new(1.0, menu::LINE)).corner_radius(menu::R_PANEL).inner_margin(egui::Margin::symmetric(14, 10))
 }
 
+/// Reserve the PFD and its right-hand readouts before placing the navigation card.
+pub(crate) fn nav_hud_dock(available: f32, width: f32) -> Option<(f32, f32)> {
+    let bottom = crate::HUD_BOTTOM + crate::HUD_H + 14.0;
+    let right = available * 0.5 + crate::HUD_W * 0.5 + 18.0;
+    if right + width + 14.0 <= available {
+        Some((right, bottom))
+    } else if width + 28.0 <= available {
+        Some(((available - width) * 0.5, bottom))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn nav_card_clears_primary_instruments_at_wide_and_narrow_sizes() {
+    let width = 366.0;
+    for available in [430.0, 820.0, 1_280.0] {
+        let (left, bottom) = nav_hud_dock(available, width).unwrap();
+        assert!(left >= 14.0 && left + width <= available - 14.0);
+        assert!(bottom >= crate::HUD_BOTTOM + crate::HUD_H + 12.0);
+    }
+    assert!(nav_hud_dock(350.0, width).is_none());
+}
+
 pub(crate) fn fade_meshes(jobs: &mut [egui::ClippedPrimitive], opacity: f32) {
     for job in jobs {
         if let egui::epaint::Primitive::Mesh(mesh) = &mut job.primitive {

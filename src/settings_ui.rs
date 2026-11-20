@@ -462,7 +462,7 @@ impl Game {
         card(ui, t!("Flight rules", "Règles de vol"), |ui| {
             row(ui, t!("Collisions", "Collisions"), self.collision_mode.description(), |ui| {
                 egui::ComboBox::from_id_salt("collision_mode").selected_text(self.collision_mode.label()).show_ui(ui, |ui| {
-                    for mode in crate::settings::CollisionMode::ALL {
+                    for mode in crate::settings::CollisionMode::PLAYER_MODES {
                         ui.selectable_value(&mut self.collision_mode, mode, mode.label()).on_hover_text(mode.description());
                     }
                 });
