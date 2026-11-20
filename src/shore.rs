@@ -107,21 +107,25 @@ pub struct Shore {
 
 impl Shore {
     pub fn frame(&mut self, cam: DVec3) -> ShoreFrame {
-        // New axes when far from the old ones (the squares' "up" must stay up).
-        if self.axes.is_none_or(|a| (cam - a.c).length() > 40_000.0) {
-            let (e, n, u) = crate::geo::enu(cam);
-            self.axes = Some(Square { c: cam, e, n, u });
+        // Project from sea level so the field stays on the coast during a
+        // vertical camera move and the mask's depth still covers the surface.
+        let surface = cam.normalize() * crate::geo::R;
+        if self.axes.is_none_or(|a| (surface - a.c).length() > 40_000.0) {
+            let (e, n, u) = crate::geo::enu(surface);
+            self.axes = Some(Square { c: surface, e, n, u });
+            self.shown = None;
+            self.building = None;
         }
         let a = self.axes.unwrap();
         let snap = TEXEL * 16.0;
-        let o = cam - a.c;
+        let o = surface - a.c;
         let c = a.c + a.e * ((o.dot(a.e) / snap).round() * snap) + a.n * ((o.dot(a.n) / snap).round() * snap);
         let target = Square { c, ..a };
         if self.building.is_none() {
             // Rebuild once the camera has moved on, or now and then for tiles
             // that have streamed in since.
             let moved = self.shown.is_none_or(|s| {
-                let d = cam - s.c;
+                let d = surface - s.c;
                 let up = d.dot(a.u);
                 (d - a.u * up).length() > 320.0
             });
@@ -149,6 +153,29 @@ impl Shore {
         }
         let shown = self.shown.unwrap_or(target);
         ShoreFrame { step, build_vp: build.vp(cam, HALF), build_vp_wide: build.vp(cam, WIDE_HALF), build_c: build.c - cam, vp: shown.vp(cam, HALF), on: self.shown.is_some() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shoreline_stays_at_sea_level_through_a_vertical_descent() {
+        let mut shore = Shore::default();
+        let high = crate::geo::lla_to_pos(0.65, -2.1, 120_000.0);
+        let low = crate::geo::lla_to_pos(0.65, -2.1, 600.0);
+        let raster = shore.frame(high);
+        assert!(matches!(raster.step, Some(Step::Raster)));
+        assert!(((raster.build_c + high).length() - crate::geo::R).abs() < 1e-6);
+        for i in 0..JUMPS.len() {
+            assert!(matches!(shore.frame(high).step, Some(Step::Jump(n)) if n == i));
+        }
+        let resolved = shore.frame(low);
+        assert!(matches!(resolved.step, Some(Step::Resolve)) && resolved.on);
+        assert!(shore.frame(low).step.is_none());
+        let new_coast = shore.frame(crate::geo::lla_to_pos(0.65, -2.0, 600.0));
+        assert!(matches!(new_coast.step, Some(Step::Raster)) && !new_coast.on);
     }
 }
 

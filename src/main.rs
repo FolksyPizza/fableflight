@@ -6055,7 +6055,7 @@ impl Game {
         }
         // Shadow cascades: three nested boxes around the aircraft, each snapped
         // to its own texel grid so shadows do not shimmer as it moves.
-        let shadow_on = mu > 0.04 && !in_menu && !preparing && self.gfx.shadows != graphics::Level::Off;
+        let shadow_on = mu > 0.04 && !in_menu && !orbit && !preparing && self.gfx.shadows != graphics::Level::Off;
         let sres = self.r.shadow_res() as f32;
         // (the aircraft's layer may use only part of it: Renderer::plane_shadow_res)
         let pres = self.r.plane_shadow_res() as f32;
@@ -6244,7 +6244,7 @@ impl Game {
         // At cloud height the aircraft glass would cause a full-resolution
         // scene copy for subpixel geometry. The shader warms up during loading.
         let aircraft_px = f64::from(self.spec.span * rh) / (cam.distance(self.plane.pos).max(1.0) * f64::from((fov * 0.5).tan()));
-        let draw_aircraft = !in_menu && !preparing && (!loading || aircraft_px >= 1.5);
+        let draw_aircraft = !in_menu && !orbit && !preparing && (!loading || aircraft_px >= 1.5);
         let params = if draw_aircraft { self.instruments(agl) } else { [[0.0; 4]; 6] };
         let mut own_lights = Vec::new();
         if draw_aircraft && !self.crashed {
@@ -6378,7 +6378,7 @@ impl Game {
         let mut insts = Vec::new();
         let mut fall = Vec::new();
         let mut air_lights = own_lights;
-        if !in_menu {
+        if !in_menu && !orbit {
             let local = (self.utc + clon.to_degrees() / 15.0).rem_euclid(24.0);
             let sun_up = geo::enu(cam).2.dot(self.sun_dir());
             self.world.car_instances(cam, cars::activity(local as f32), sun_up, &mut insts, &mut air_lights);
@@ -6415,7 +6415,7 @@ impl Game {
         if let Some(px) = self.gclouds.step(&self.src, map_view) {
             self.r.upload_globe_clouds(&px);
         }
-        if !in_menu {
+        if !in_menu && !orbit {
             self.live.instances(cam, &mut insts, &mut air_lights);
         }
         self.live_view = Some((vp, cam));
@@ -6468,26 +6468,40 @@ impl Game {
             psim.ve = v4(ve, cs);
             psim.vn = v4(vn, zmin - lift);
         }
-        let pf = self.world.photo_frame(cam);
-        let photo = self.world.photo_draws(cam);
-        g.photo_vp = pf.mask_vp.to_cols_array_2d();
-        g.photo = pf.zone;
-        g.photo_c = pf.centre;
-        g.photo_sun = pf.sun;
-        g.cut = pf.cut;
-        g.cut_v = pf.cut_v;
-        casc_vp[render::MASK_SLOT] = g.photo_vp;
-        let (tiles, tess, details, near) = self.world.draw_lists(cam, focus_abs, shadow_on.then_some(CASC));
+        let photo = if orbit {
+            Vec::new()
+        } else {
+            let pf = self.world.photo_frame(cam);
+            g.photo_vp = pf.mask_vp.to_cols_array_2d();
+            g.photo = pf.zone;
+            g.photo_c = pf.centre;
+            g.photo_sun = pf.sun;
+            g.cut = pf.cut;
+            g.cut_v = pf.cut_v;
+            casc_vp[render::MASK_SLOT] = g.photo_vp;
+            self.world.photo_draws(cam)
+        };
+        let (tiles, tess, details, near) = if orbit { Default::default() } else {
+            self.world.draw_lists(cam, focus_abs, shadow_on.then_some(CASC))
+        };
         let cover = if mu < 0.14 && !orbit { self.world.light_cover(cam) } else { Vec::new() };
-        // The shore distance field: a step of its rebuild this frame.
-        let sf = self.shore.frame(cam);
-        casc_vp[render::SHORE_SLOT] = sf.build_vp;
-        casc_vp[render::SHORE_WIDE_SLOT] = sf.build_vp_wide;
-        g.shore_vp = sf.vp;
-        g.shore = [if sf.on { 1.0 } else { 0.0 }, shore::TEXEL as f32, shore::MAX_D, 2.0 * shore::HALF as f32];
-        let shore_tiles = if matches!(sf.step, Some(shore::Step::Raster)) { self.world.shore_tiles(cam, sf.build_c) } else { Vec::new() };
-        let shore_c = sf.build_c.as_vec3().to_array();
-        let fields = if in_menu { Vec::new() } else { self.world.field_draws(cam) };
+        let water_visible = !orbit && self.world.water_in_view();
+        let (shore, shore_c, shore_tiles) = if water_visible {
+            let sf = self.shore.frame(cam);
+            casc_vp[render::SHORE_SLOT] = sf.build_vp;
+            casc_vp[render::SHORE_WIDE_SLOT] = sf.build_vp_wide;
+            g.shore_vp = sf.vp;
+            g.shore = [if sf.on { 1.0 } else { 0.0 }, shore::TEXEL as f32, shore::MAX_D, 2.0 * shore::HALF as f32];
+            let tiles = if matches!(sf.step, Some(shore::Step::Raster)) {
+                self.world.shore_tiles(cam, sf.build_c)
+            } else {
+                Vec::new()
+            };
+            (sf.step, sf.build_c.as_vec3().to_array(), tiles)
+        } else {
+            (None, [0.0; 3], Vec::new())
+        };
+        let fields = if in_menu || orbit { Vec::new() } else { self.world.field_draws(cam) };
         let mut shot = match self.shots.first() {
             Some((t, _, _)) if self.real >= *t => {
                 // Logged with each scripted shot, for comparing builds.
@@ -6522,11 +6536,11 @@ impl Game {
         let (skin_slots, skins) = if in_menu { (Vec::new(), Vec::new()) } else { self.destr.skin_draws() };
         self.r.stats[0] += now.elapsed().as_secs_f64();
         let mut bolts = Vec::new();
-        if !in_menu {
+        if !in_menu && !orbit {
             self.lightning.segments(cam, dt, &mut bolts);
         }
-        let rain_drops = if in_menu || self.cam_rain < 0.002 { 0 } else { render::RAIN_DROPS };
-        self.r.render(Frame { rain_drops, bolts, approach_lines, g, tiles, tess, details, photo, skins, skin_slots, fields, lights: air_lights, objs, insts, fall, near, casc_vp, shore: sf.step, shore_c, shore_tiles, psim, sim_steps: dt > 0.0, fluid, ocean: self.world.water_in_view().then(|| self.world.ocean.uniform()), egui: Some(ui), shot, logo: (map_view && self.menu.screen == menu::Screen::Main).then(|| self.egui_ctx.pixels_per_point()), cover, glow: glow_px });
+        let rain_drops = if in_menu || orbit || self.cam_rain < 0.002 { 0 } else { render::RAIN_DROPS };
+        self.r.render(Frame { rain_drops, bolts, approach_lines, g, tiles, tess, details, photo, skins, skin_slots, fields, lights: air_lights, objs, insts, fall, near, casc_vp, shore, shore_c, shore_tiles, psim, sim_steps: dt > 0.0, fluid, ocean: water_visible.then(|| self.world.ocean.uniform()), egui: Some(ui), shot, logo: (map_view && self.menu.screen == menu::Screen::Main).then(|| self.egui_ctx.pixels_per_point()), cover, glow: glow_px });
         self.finish_mcp_shots();
         if self.flight_transition.is_some_and(|fade| matches!(fade, FlightTransition::ToDesktop(start) if self.real - start >= FlightTransition::OUT)) {
             self.quit = true;

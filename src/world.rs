@@ -284,6 +284,38 @@ impl Frustum {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TerrainPass {
+    Prefetch,
+    Stream,
+    Draw,
+}
+
+struct TerrainView<'a> {
+    eye: DVec3,
+    up: DVec3,
+    frustum: &'a Frustum,
+    lat: f64,
+    lon: f64,
+    ground: f64,
+    horizon_dot: f64,
+    pass: TerrainPass,
+}
+
+impl<'a> TerrainView<'a> {
+    fn new(eye: DVec3, (lat, lon, altitude, ground): (f64, f64, f64, f64), frustum: &'a Frustum, pass: TerrainPass) -> Self {
+        let horizon = (geo::R / (geo::R + altitude.max(1.0))).acos()
+            + (geo::R / (geo::R + 9000.0)).acos();
+        Self { eye, up: eye.normalize(), frustum, lat, lon, ground, horizon_dot: horizon.cos(), pass }
+    }
+
+    fn prefetch_details(&self, id: TileId, offset: DVec3, radius: f64) -> bool {
+        self.pass != TerrainPass::Prefetch || id.z < 10
+            || offset.length_squared() <= (radius + crate::shore::HALF * 1.6).powi(2)
+            || self.frustum.sphere(offset, radius + id.width_m() * 0.35)
+    }
+}
+
 impl World {
     pub fn new(loader: Loader, max_zoom: u8) -> Self {
         let photo = Some(Box::new(crate::tiles3d::Photo::new(loader.src.google.clone(), Some(loader.src.clone()))));
@@ -977,9 +1009,9 @@ impl World {
         for (eye, view) in departure_views {
             let (lat, lon, alt) = geo::pos_to_lla(*eye);
             let ground = self.terrain_ground(lat, lon).map_or(0.0, |g| g.h);
-            self.select_terrain(*eye, (lat, lon, alt.max(1.0), ground), view, true);
+            self.select_terrain(TerrainView::new(*eye, (lat, lon, alt, ground), view, TerrainPass::Prefetch));
         }
-        self.select_terrain(cam, (clat, clon, calt.max(1.0), gh), fr, true);
+        self.select_terrain(TerrainView::new(cam, (clat, clon, calt, gh), fr, TerrainPass::Stream));
 
         // Hold the prepared building set through the descent, then resume
         // selecting from the live flight view. No second ring of jobs mid-shot.
@@ -1166,19 +1198,21 @@ impl World {
     pub fn show_departure_from(&mut self, cam: DVec3, fr: &Frustum) {
         let (lat, lon, alt) = geo::pos_to_lla(cam);
         let ground = self.terrain_ground(lat, lon).map_or(0.0, |g| g.h);
-        self.select_terrain(cam, (lat, lon, alt.max(1.0), ground), fr, false);
+        self.select_terrain(TerrainView::new(cam, (lat, lon, alt, ground), fr, TerrainPass::Draw));
         self.frustum = Some(fr.clone());
         for (id, visible) in self.draw_b.iter().zip(&mut self.in_view) {
             *visible = matches!(self.builds.get(id), Some(BSlot::Ready(b)) if fr.sphere(b.center - cam, b.radius));
         }
     }
 
-    fn select_terrain(&mut self, cam: DVec3, local: (f64, f64, f64, f64), fr: &Frustum, stream: bool) {
-        self.draw.clear();
-        self.draw_shore.clear();
+    fn select_terrain(&mut self, view: TerrainView<'_>) {
+        if view.pass != TerrainPass::Prefetch {
+            self.draw.clear();
+            self.draw_shore.clear();
+        }
         for y in 0..4 {
             for x in 0..4 {
-                self.select(TileId::new(2, x, y), cam, local, fr, stream);
+                self.select(TileId::new(2, x, y), &view);
             }
         }
     }
@@ -1337,64 +1371,56 @@ impl World {
 
     /// Nearest point of a tile to the camera, on the ground, and whether the
     /// whole tile lies below the horizon (never drawn, so never needed).
-    fn tile_near(id: TileId, cam: DVec3, c: (f64, f64, f64, f64)) -> (DVec3, bool) {
-        let (clat, clon, calt, gh) = c;
+    fn tile_near(id: TileId, view: &TerrainView<'_>) -> (DVec3, bool) {
         let (lat_n, lon_w) = id.lat_lon(0.0, 0.0);
         let (lat_s, lon_e) = id.lat_lon(1.0, 1.0);
-        let mut dl = clon;
-        if dl < lon_w - std::f64::consts::PI {
-            dl += std::f64::consts::TAU;
-        } else if dl > lon_e + std::f64::consts::PI {
-            dl -= std::f64::consts::TAU;
+        let mut lon = view.lon;
+        if lon < lon_w - std::f64::consts::PI {
+            lon += std::f64::consts::TAU;
+        } else if lon > lon_e + std::f64::consts::PI {
+            lon -= std::f64::consts::TAU;
         }
-        let near = geo::lla_to_pos(clat.clamp(lat_s, lat_n), dl.clamp(lon_w, lon_e), gh);
-        let hidden = id.z > 2 && {
-            let ang = (near.normalize().dot(cam.normalize())).clamp(-1.0, 1.0).acos();
-            let horizon = (geo::R / (geo::R + calt)).acos() + (geo::R / (geo::R + 9000.0)).acos();
-            ang > horizon
-        };
+        let near = geo::lla_to_pos(view.lat.clamp(lat_s, lat_n), lon.clamp(lon_w, lon_e), view.ground);
+        let hidden = id.z > 2 && near.normalize().dot(view.up) < view.horizon_dot;
         (near, hidden)
     }
 
-    /// Returns true if this tile (or its descendants) covers its area.
-    fn select(&mut self, id: TileId, cam: DVec3, c: (f64, f64, f64, f64), fr: &Frustum, stream: bool) -> bool {
-        let (near, hidden) = Self::tile_near(id, cam, c);
-        let dist = (near - cam).length().max(1.0);
+    fn select(&mut self, id: TileId, view: &TerrainView<'_>) {
+        let (near, hidden) = Self::tile_near(id, view);
         if hidden {
-            return true;
+            return;
         }
+        let dist = (near - view.eye).length().max(1.0);
+        let stream = view.pass != TerrainPass::Draw;
         let (center, radius) = match self.tiles.get_mut(&id) {
             Some(Slot::Ready(t)) => {
                 t.last_used = self.frame;
-                // made with the imagery source switched away from: again, after what is missing
                 if stream && !t.refreshing && t.generation != self.loader.src.google.generation() {
                     self.wanted.push((2.0 + (dist / id.width_m()) as f32, id.with_refresh()));
                 }
                 (t.center, t.radius)
             }
-            Some(_) => return false,
+            Some(_) => return,
             None => {
                 if stream {
                     self.wanted.push(((dist / id.width_m()) as f32, id));
                 }
-                return false;
+                return;
             }
         };
         let width = id.width_m();
-        if id.z < self.max_zoom && width / dist > self.lod_k {
+        if id.z < self.max_zoom && width / dist > self.lod_k && view.prefetch_details(id, center - view.eye, radius) {
             let kids = id.children();
             let mut all = true;
             for k in kids {
-                // A child below the horizon is never drawn: it need not be in
-                // memory (and is evicted, not being used), so it must not
-                // hold its siblings back and leave this coarser tile showing.
-                if Self::tile_near(k, cam, c).1 {
+                // A child below the horizon is never drawn. Off-camera
+                // siblings still load before we can use the finer group.
+                if Self::tile_near(k, view).1 {
                     continue;
                 }
                 match self.tiles.get(&k) {
                     Some(Slot::Ready(_)) => {}
-                    Some(Slot::Loading) => all = false,
-                    Some(Slot::Failed) => all = false,
+                    Some(Slot::Loading | Slot::Failed) => all = false,
                     None => {
                         all = false;
                         if stream {
@@ -1405,17 +1431,19 @@ impl World {
             }
             if all {
                 for k in kids {
-                    self.select(k, cam, c, fr, stream);
+                    self.select(k, view);
                 }
-                return true;
+                return;
             }
         }
-        if fr.sphere(center - cam, radius) {
+        if view.pass == TerrainPass::Prefetch {
+            return;
+        }
+        if view.frustum.sphere(center - view.eye, radius) {
             self.draw.push(id);
-        } else if (center - cam).length() - radius < crate::shore::WIDE_HALF * 1.6 {
+        } else if (center - view.eye).length() - radius < crate::shore::WIDE_HALF * 1.6 {
             self.draw_shore.push(id);
         }
-        true
     }
 
     /// Terrain tiles out of view that reach into the shore mask's square
@@ -1746,5 +1774,41 @@ impl Tag for TileId {
     /// Marks a request to remake a loaded terrain tile (new imagery source).
     fn with_refresh(self) -> Self {
         TileId::new(self.z | 0x40, self.x, self.y)
+    }
+}
+
+#[cfg(test)]
+mod terrain_prefetch_tests {
+    use super::*;
+
+    #[test]
+    fn departure_prefetch_keeps_view_buffer_and_nearby_tiles() {
+        let frustum = Frustum([
+            DVec4::new(1.0, 0.0, -1.0, 0.0),
+            DVec4::new(-1.0, 0.0, -1.0, 0.0),
+            DVec4::new(0.0, 1.0, -1.0, 0.0),
+            DVec4::new(0.0, -1.0, -1.0, 0.0),
+        ]);
+        let eye = geo::lla_to_pos(0.65, -2.1, 9000.0);
+        let local = (0.65, -2.1, 9000.0, 0.0);
+        let view = TerrainView::new(eye, local, &frustum, TerrainPass::Prefetch);
+        let detail = TileId::at(0.65, -2.1, 14);
+        assert!(view.prefetch_details(detail, DVec3::new(0.0, 0.0, -30_000.0), 1000.0));
+        assert!(view.prefetch_details(detail, DVec3::new(31_000.0, 0.0, -30_000.0), 1000.0));
+        assert!(view.prefetch_details(detail, DVec3::new(0.0, 0.0, 20.0), 1000.0));
+        let behind = DVec3::new(0.0, 0.0, 30_000.0);
+        assert!(!view.prefetch_details(detail, behind, 1000.0));
+        assert!(view.prefetch_details(detail.ancestor(9).0, behind, 1000.0));
+        let flight = TerrainView::new(eye, local, &frustum, TerrainPass::Stream);
+        assert!(flight.prefetch_details(detail, behind, 1000.0));
+    }
+
+    #[test]
+    fn horizon_culling_agrees_at_wrapped_longitudes() {
+        let frustum = Frustum([DVec4::ZERO; 4]);
+        let eye = geo::lla_to_pos(0.0, 3.141, 9000.0);
+        let view = TerrainView::new(eye, (0.0, 3.141, 9000.0, 0.0), &frustum, TerrainPass::Prefetch);
+        assert!(!World::tile_near(TileId::at(0.0, -3.141, 14), &view).1);
+        assert!(World::tile_near(TileId::at(0.0, 0.0, 14), &view).1);
     }
 }
