@@ -1215,6 +1215,46 @@ fn globe_pixel(id: TileId, u: f64, v: f64) -> [u8; 3] {
     sample_globe(globe_image(), x, y)
 }
 
+// Native NASA RGB patches are read only where regional tiles need offline
+// imagery. The 8K globe texture remains the lightweight view from orbit.
+#[derive(Default)]
+struct GlobeDetail {
+    patches: HashMap<TileId, Option<Arc<image::RgbImage>>>,
+}
+
+impl GlobeDetail {
+    const PATCH: u32 = 900;
+    const COLS: u32 = 24;
+    const ROWS: u32 = 12;
+
+    fn patch(id: TileId) -> Option<Arc<image::RgbImage>> {
+        static CACHE: std::sync::LazyLock<Mutex<Lru<image::RgbImage>>> =
+            std::sync::LazyLock::new(|| Mutex::new(Lru::new(12)));
+        if let Some(image) = CACHE.lock().get(id) { return Some(image); }
+        let pack = include_bytes!("../assets/ui/blue-marble-detail.bin");
+        let data = ((Self::COLS * Self::ROWS + 1) * 4) as usize;
+        let index = ((id.y * Self::COLS + id.x) * 4) as usize;
+        let offset = |i| u32::from_le_bytes(pack[i..i + 4].try_into().unwrap()) as usize;
+        let jpeg = pack.get(data + offset(index)..data + offset(index + 4))?;
+        let image = Arc::new(image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg).ok()?.into_rgb8());
+        CACHE.lock().put(id, image.clone());
+        Some(image)
+    }
+
+    fn sample(&mut self, u: f64, v: f64) -> [u8; 3] {
+        let side = f64::from(Self::PATCH);
+        let x = u.rem_euclid(1.0) * f64::from(Self::COLS);
+        let y = v.clamp(0.0, 1.0) * f64::from(Self::ROWS);
+        let id = TileId::new(0, (x as u32).min(Self::COLS - 1), (y as u32).min(Self::ROWS - 1));
+        if let Some(image) = self.patches.entry(id).or_insert_with(|| Self::patch(id)) {
+            let local = |p: f64, i: u32| ((p - f64::from(i)) * side + 1.0) / (side + 2.0);
+            sample_globe(image, local(x, id.x), local(y, id.y))
+        } else {
+            sample_globe(globe_image(), u, v)
+        }
+    }
+}
+
 /// A local satellite-map thumbnail when no imagery has been cached.
 pub fn offline_map_thumbnail(id: TileId) -> image::RgbaImage {
     const SIZE: u32 = 64;
@@ -1292,19 +1332,31 @@ impl RunwayRelief {
 fn fallback_imagery(id: TileId, mask: &[u8]) -> image::RgbaImage {
     // The bundled map carries continent-scale colour. Use mapped land cover
     // for local detail where it is available and keep these tiles small.
-    let size = if id.z <= 6 { 128 } else if id.z < 12 { 32 } else { 16 };
+    let size = if id.z <= 6 { 128 } else if id.z < 10 { 64 } else if id.z < 12 { 32 } else { 16 };
+    let mut detail = GlobeDetail::default();
     image::RgbaImage::from_fn(size, size, |x, y| {
         let (u, v) = ((x as f64 + 0.5) / size as f64, (y as f64 + 0.5) / size as f64);
         let i = ((v * MASK as f64) as usize * MASK + (u * MASK as f64) as usize) * 4;
-        let [r, g, b] = match (mask[i] > 127, mask[i + 2] & 15) {
-            (true, _) => [26, 50, 72],
-            (_, LC_WOOD) => [45, 64, 37],
-            (_, LC_SCRUB | LC_GRASS | GC_PITCH) => [95, 110, 66],
-            (_, LC_FARM) => [125, 119, 79],
-            (_, LC_WET) => [61, 79, 64],
-            (_, LC_ROCK | GC_PAVED) => [116, 112, 106],
-            _ => globe_pixel(id, u, v),
+        if mask[i] > 127 {
+            return image::Rgba([26, 50, 72, 255]);
+        }
+        let color = if id.z >= 6 {
+            let (longitude, latitude) = globe_uv(id, u, v);
+            detail.sample(longitude, latitude)
+        } else {
+            globe_pixel(id, u, v)
         };
+        // Land cover supplies material colour while the imagery keeps the
+        // underlying contours, fields and coastline visible.
+        let cover = match mask[i + 2] & 15 {
+            LC_WOOD => [45, 64, 37],
+            LC_SCRUB | LC_GRASS | GC_PITCH => [95, 110, 66],
+            LC_FARM => [125, 119, 79],
+            LC_WET => [61, 79, 64],
+            LC_ROCK | GC_PAVED => [116, 112, 106],
+            _ => color,
+        };
+        let [r, g, b] = std::array::from_fn(|k| ((u16::from(color[k]) * 2 + u16::from(cover[k])) / 3) as u8);
         image::Rgba([r, g, b, 255])
     })
 }
@@ -1666,6 +1718,18 @@ mod fallback_tests {
     fn isolated_land_spikes_are_filtered_without_rounding_ridges() {
         assert_eq!(clean_land_spike(66.0, [10.0; 8], 36.0), 10.0);
         assert_eq!(clean_land_spike(66.0, [10.0, 20.0, 35.0, 12.0, 52.0, 20.0, 30.0, 40.0], 36.0), 66.0);
+    }
+
+    #[test]
+    fn native_atlas_loads_regions_and_wraps_across_the_dateline() {
+        let mut detail = GlobeDetail::default();
+        let left = detail.sample(0.0, 0.27);
+        assert_eq!(left, detail.sample(1.0, 0.27));
+        let right = detail.sample(1.0 - 1e-9, 0.27);
+        assert!(left.into_iter().zip(right).all(|(a, b)| a.abs_diff(b) <= 8));
+        for (_, tile) in detail.patches {
+            assert_eq!(tile.unwrap().dimensions(), (902, 902));
+        }
     }
 
     #[test]

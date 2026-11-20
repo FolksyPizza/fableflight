@@ -1155,6 +1155,13 @@ impl World {
         self.in_view.clear();
     }
 
+    /// Keep the prepared route resident while the orbital surface is visible.
+    pub fn hide_departure_terrain(&mut self) {
+        self.draw.clear();
+        self.draw_shore.clear();
+        self.in_view.fill(false);
+    }
+
     /// Draw the camera's view while keeping the aircraft's local scenery resident.
     pub fn show_departure_from(&mut self, cam: DVec3, fr: &Frustum) {
         let (lat, lon, alt) = geo::pos_to_lla(cam);

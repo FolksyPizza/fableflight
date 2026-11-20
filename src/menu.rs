@@ -1096,6 +1096,26 @@ pub fn key_cap(ui: &mut egui::Ui, keys: &str) -> egui::Response {
 }
 
 /// One `keys … action` row of the controls list.
+/// A navigation result with a fixed code column and a readable name.
+pub fn airport_result(ui: &mut egui::Ui, code: &str, name: &str, selected: bool) -> egui::Response {
+    use egui::{Align2, Sense, Stroke, pos2, vec2};
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, format!("{code} {name}")));
+    let active = response.hovered() || response.has_focus() || selected;
+    let p = ui.painter();
+    if active {
+        p.rect_filled(rect, 3.0, Color32::from_white_alpha(if selected { 22 } else { 14 }));
+    }
+    p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, LINE));
+    p.text(pos2(rect.left() + 8.0, rect.center().y), Align2::LEFT_CENTER, code, data(), if active { ACCENT } else { TEXT });
+    let mut job = egui::text::LayoutJob::simple_singleline(name.to_owned(), label(), TEXT);
+    job.wrap.max_rows = 1;
+    job.wrap.max_width = (rect.width() - 62.0).max(8.0);
+    let text = p.layout_job(job);
+    p.galley(pos2(rect.left() + 54.0, rect.center().y - text.size().y * 0.5), text, TEXT);
+    response
+}
+
 pub fn key_row(ui: &mut egui::Ui, keys: &'static str, what: &'static str) {
     key_cap(ui, tr(keys));
     // Truncate the description so a long one can't spill into the next column.

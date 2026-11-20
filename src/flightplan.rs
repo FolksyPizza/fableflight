@@ -170,14 +170,23 @@ impl Game {
             }
         });
         let mut remove = None;
-        for (index, &i) in self.flight_plan.airports.iter().enumerate() {
-            let apt = &airports::Db::get().apts[i as usize];
-            let nm = range(self.plane.pos, airport_pos(i)) / 1852.0;
-            ui.push_id(index, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.small_button(t!("Remove", "Retirer")).clicked() { remove = Some(index); }
-                    ui.label(RichText::new(format!("{}  {:>5.1} NM", apt.code(), nm)).font(menu::data()));
-                });
+        if !self.flight_plan.airports.is_empty() {
+            ui.add_space(4.0);
+            egui::Grid::new("airport_route").num_columns(3).spacing([14.0, 7.0]).show(ui, |ui| {
+                ui.label(RichText::new(t!("Airport", "Aéroport")).font(menu::caption()).color(menu::DIM));
+                ui.label(RichText::new(t!("Distance", "Distance")).font(menu::caption()).color(menu::DIM));
+                ui.end_row();
+                for (index, &i) in self.flight_plan.airports.iter().enumerate() {
+                    let apt = &airports::Db::get().apts[i as usize];
+                    let nm = range(self.plane.pos, airport_pos(i)) / 1852.0;
+                    let color = if index == 0 && self.flight_plan.follow { menu::ACCENT } else { menu::TEXT };
+                    ui.label(RichText::new(apt.code()).font(menu::data()).color(color)).on_hover_text(&apt.name);
+                    ui.label(RichText::new(format!("{nm:.1} NM")).font(menu::data()).color(menu::DIM));
+                    ui.push_id(index, |ui| {
+                        if ui.small_button(t!("Remove", "Retirer")).clicked() { remove = Some(index); }
+                    });
+                    ui.end_row();
+                }
             });
         }
         if let Some(index) = remove {
@@ -207,7 +216,9 @@ impl Game {
                 }
             }
             let apt = &airports::Db::get().apts[destination as usize];
-            ui.label(RichText::new(apt.code()).font(menu::data()).color(menu::TEXT));
+            ui.add_space(10.0);
+            menu::heading(ui, t!("Arrival", "Arrivée"));
+            ui.label(RichText::new(format!("{}  ·  {}", apt.code(), apt.name)).font(menu::label()).color(menu::TEXT));
             let selection = apt.rwys.iter().flat_map(|r| r.ident.iter())
                 .find(|id| !id.is_empty() && airports::norm_ident(id) == airports::norm_ident(&self.flight_plan.runway))
                 .cloned();
