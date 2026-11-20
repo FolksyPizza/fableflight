@@ -53,7 +53,7 @@ CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 ./scripts/b
 ./target/release/fablegame
 ```
 
-If the app builds but cannot open a graphics adapter, check that your graphics driver exposes Vulkan.
+On Linux the loading window stays responsive while graphics shaders compile. Its title shows the current stage and elapsed time. Startup also prints the selected GPU and backend in the terminal. If it reports `llvmpipe` or `lavapipe`, the system is exposing a CPU renderer. Check for a hardware adapter with `vulkaninfo --summary` (from the `vulkan-tools` package on Ubuntu) and check the GPU driver. Software rendering remains available for scripted captures or with `FABLE_ALLOW_SOFTWARE=1`.
 
 **macOS and Windows**
 

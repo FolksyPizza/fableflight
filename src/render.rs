@@ -1504,14 +1504,18 @@ fn wave_texture() -> Vec<u8> {
 }
 
 impl Renderer {
-    pub async fn new(window: Arc<winit::window::Window>, gfx: &mut crate::graphics::Graphics, auto_scale: bool, scale_override: Option<f32>) -> anyhow::Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    pub async fn new(window: Arc<winit::window::Window>, gfx: &mut crate::graphics::Graphics, auto_scale: bool, scale_override: Option<f32>, allow_software: bool, progress: &dyn Fn(&str)) -> anyhow::Result<Self> {
+        progress(crate::t!("Finding a graphics device", "Recherche d’un périphérique graphique"));
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface = instance.create_surface(window.clone())?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, force_fallback_adapter: false, compatible_surface: Some(&surface), ..Default::default() })
             .await?;
         let info = adapter.get_info();
         log::info!("GPU: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
+        if cfg!(target_os = "linux") && info.device_type == wgpu::DeviceType::Cpu && !allow_software {
+            anyhow::bail!("{} is a software graphics adapter. Fable Flight needs a working hardware driver for interactive play. Check the adapters with vulkaninfo --summary. Set FABLE_ALLOW_SOFTWARE=1 to run on the CPU anyway.", info.name);
+        }
         let integrated = info.device_type == wgpu::DeviceType::IntegratedGpu;
         let msaa_override = std::env::var("FABLE_MSAA").ok().and_then(|v| v.parse().ok());
         let samples = msaa_override.unwrap_or_else(|| gfx.samples());
@@ -1542,6 +1546,7 @@ impl Renderer {
         surface.configure(&device, &config);
         log::info!("surface {:?}, final passes {}", config.format, if direct_out(&config) { "straight to it" } else { "via a blit" });
 
+        progress(crate::t!("Preparing graphics shaders", "Préparation des shaders graphiques"));
         let d = &device;
         let common = include_str!("shaders/common.wgsl");
         let module = |name: &str, src: &str| d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(name), source: wgpu::ShaderSource::Wgsl(format!("{common}\n{src}").into()) });
@@ -1721,6 +1726,7 @@ impl Renderer {
         let cloud_relief: Vec<u8> = globe_relief.iter().flat_map(|&height| [0, height]).collect();
         let gclouds_view = upload_mips_rect(d, &queue, "globe clouds and relief", (cw, ch), wgpu::TextureFormat::Rg8Unorm, 2, &[cloud_relief]);
         let gclouds_tex = gclouds_view.texture().clone();
+        progress(crate::t!("Preparing the offline globe", "Préparation du globe hors ligne"));
         let earth = crate::sources::globe_image();
         let (gw, gh) = earth.dimensions();
         let rgba = crate::sources::NightLights::get().globe_rgba(earth);
@@ -2095,6 +2101,7 @@ impl Renderer {
         });
         let p_build_shadow = geom("build shadow", Some(&l_build), &m_build, &[vb(40, false, &A_BUILD)], 1);
         const A_PART: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x2, 4 => Float32x4];
+        progress(crate::t!("Compiling aircraft graphics", "Compilation du rendu des avions"));
         let p_obj = geom("obj", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 0);
         let p_obj_shadow = geom("obj shadow", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 4);
         let p_obj_solid = geom("obj solid", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 5);

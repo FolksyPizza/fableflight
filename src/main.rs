@@ -257,6 +257,7 @@ struct MouseScript {
     ev: f64,
 }
 
+#[derive(Clone)]
 struct Args {
     lat: f64,
     lon: f64,
@@ -1489,7 +1490,7 @@ struct Game {
 }
 
 impl Game {
-    fn new(window: Arc<Window>, args: &Args) -> anyhow::Result<Self> {
+    fn new(window: Arc<Window>, args: &Args, progress: &dyn Fn(&str)) -> anyhow::Result<Self> {
         let prefs = settings::Settings::load();
         // Saved graphics settings; the command line overrides them for this run.
         let saved_gfx = graphics::Graphics::load();
@@ -1500,7 +1501,10 @@ impl Game {
         gfx.vsync &= args.vsync;
         gfx.taa &= args.taa && prefs.taa;
         let auto_scale = saved_gfx.is_none() && args.graphics.is_none();
-        let mut r = pollster::block_on(Renderer::new(window.clone(), &mut gfx, auto_scale, args.render_scale))?;
+        let allow_software = args.headless || args.record.is_some() || !args.shots.is_empty()
+            || std::env::var_os("FABLE_ALLOW_SOFTWARE").is_some();
+        let mut r = pollster::block_on(Renderer::new(window.clone(), &mut gfx, auto_scale, args.render_scale, allow_software, progress))?;
+        progress(t!("Preparing aircraft and scenery", "Préparation de l’avion et du décor"));
         let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame");
         r.headless = args.headless;
         // Cached scans load offline too; missing ones keep the procedural layer.
@@ -1526,7 +1530,16 @@ impl Game {
                 None => status = t!("Could not find \"{}\"", "Introuvable : « {} »", p),
             }
         }
-        let alt = args.alt.unwrap_or_else(|| ground_elev(&src, lat, lon) + args.agl.unwrap_or(450.0));
+        let alt = args.alt.unwrap_or_else(|| {
+            // The default menu has no active departure. Use local relief for
+            // its placeholder aircraft so DNS and map servers cannot hold up startup.
+            let height = if args.menu != Some(false) && !args.pos_set && args.airport.is_none() {
+                f64::from(sources::fallback_height(lat.to_radians(), lon.to_radians()).max(0.0))
+            } else {
+                ground_elev(&src, lat, lon)
+            };
+            height + args.agl.unwrap_or(450.0)
+        });
         let spec = args.aircraft.as_deref().and_then(aircraft::by_key).unwrap_or(aircraft::BUILTIN[0]);
         let mut plane = Plane::spawn(spec, lat.to_radians(), lon.to_radians(), alt, args.heading.to_radians(), args.speed.map(|kt| kt / 1.94384).unwrap_or(spec.cruise));
         if args.ship {
@@ -8228,8 +8241,22 @@ impl Game {
     }
 }
 
+enum StartupEvent {
+    Progress(String),
+    Finished(Box<anyhow::Result<Game>>),
+}
+
+struct PendingStartup {
+    events: crossbeam_channel::Receiver<StartupEvent>,
+    started: Instant,
+    phase: String,
+    last_second: Option<u64>,
+}
+
 struct App {
     args: Args,
+    startup: Option<PendingStartup>,
+    startup_error: Option<anyhow::Error>,
     game: Option<Game>,
     splash: Option<startup::Splash>,
     frame_pacer: frame_pacer::FramePacer,
@@ -8247,21 +8274,42 @@ impl App {
             .with_inner_size(winit::dpi::PhysicalSize::new(self.args.size.0, self.args.size.1))
             .with_visible(self.splash.is_none());
         let window = Arc::new(el.create_window(attrs)?);
-        let game = Game::new(window, &self.args)?;
+        #[cfg(target_os = "linux")]
+        if self.splash.is_some() {
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let args = self.args.clone();
+            std::thread::Builder::new().name("simulator startup".into()).spawn(move || {
+                let progress = |message: &str| {
+                    log::info!("{message}");
+                    let _ = tx.send(StartupEvent::Progress(message.to_owned()));
+                };
+                let game = Game::new(window, &args, &progress);
+                let _ = tx.send(StartupEvent::Finished(Box::new(game)));
+            })?;
+            self.startup = Some(PendingStartup {
+                events: rx, started: Instant::now(), phase: t!("Starting", "Démarrage").into(), last_second: None,
+            });
+            return Ok(());
+        }
+        let game = Game::new(window, &self.args, &|message| log::info!("{message}"))?;
+        self.open_game(game);
+        Ok(())
+    }
+
+    fn open_game(&mut self, game: Game) {
         if let Some(splash) = &mut self.splash {
             // An occluded surface may withhold its first drawable. Release
             // the splash after a short grace period if that happens.
             splash.deadline = Instant::now() + std::time::Duration::from_millis(800);
-            game.window.set_visible(true);
         }
+        game.window.set_visible(true);
         game.window.request_redraw();
         self.game = Some(game);
-        Ok(())
     }
 
     fn initialize(&mut self, el: &ActiveEventLoop) {
         if let Err(err) = self.start_game(el) {
-            eprintln!("failed to start: {err:#}");
+            self.startup_error = Some(err);
             self.splash = None;
             el.exit();
         }
@@ -8270,7 +8318,7 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.game.is_some() || self.splash.is_some() {
+        if self.game.is_some() || self.splash.is_some() || self.startup.is_some() {
             return;
         }
         if !self.args.headless && self.args.record.is_none() && self.args.shots.is_empty() {
@@ -8299,7 +8347,7 @@ impl ApplicationHandler for App {
                     if let Err(err) = splash.paint() {
                         log::warn!("startup screen: {err}");
                         self.splash = None;
-                        if self.game.is_none() {
+                        if self.game.is_none() && self.startup.is_none() {
                             self.initialize(el);
                         }
                     }
@@ -8515,6 +8563,46 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+        if let Some(startup) = &mut self.startup {
+            loop {
+                match startup.events.try_recv() {
+                    Ok(StartupEvent::Progress(message)) => {
+                        startup.phase = message;
+                        startup.last_second = None;
+                    }
+                    Ok(StartupEvent::Finished(result)) => {
+                        self.startup = None;
+                        match *result {
+                            Ok(game) => self.open_game(game),
+                            Err(err) => {
+                                self.startup_error = Some(err);
+                                self.splash = None;
+                                event_loop.exit();
+                                return;
+                            }
+                        }
+                        break;
+                    }
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                        self.startup_error = Some(anyhow::anyhow!("simulator initialization stopped unexpectedly"));
+                        self.splash = None;
+                        event_loop.exit();
+                        return;
+                    }
+                    Err(crossbeam_channel::TryRecvError::Empty) => {
+                        let seconds = startup.started.elapsed().as_secs();
+                        if let Some(splash) = &self.splash
+                            && startup.last_second != Some(seconds)
+                        {
+                            splash.window.set_title(&format!("Fable Flight · {} · {seconds}s", startup.phase));
+                            startup.last_second = Some(seconds);
+                        }
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(now + std::time::Duration::from_millis(100)));
+                        return;
+                    }
+                }
+            }
+        }
         if let Some(splash) = &self.splash {
             if self.game.is_none() {
                 if now < splash.deadline {
@@ -8797,8 +8885,9 @@ fn main() -> anyhow::Result<()> {
     let _gamemode = gamemode::GameMode::request();
     let el = EventLoop::new()?;
     el.set_control_flow(ControlFlow::Poll);
-    el.run_app(&mut App { args, game: None, splash: None, frame_pacer: frame_pacer::FramePacer::default() })?;
-    Ok(())
+    let mut app = App { args, startup: None, startup_error: None, game: None, splash: None, frame_pacer: frame_pacer::FramePacer::default() };
+    el.run_app(&mut app)?;
+    app.startup_error.map_or(Ok(()), |error| Err(error.context("failed to start Fable Flight")))
 }
 
 
