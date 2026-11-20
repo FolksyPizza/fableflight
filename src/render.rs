@@ -679,11 +679,28 @@ pub struct MeshGpu {
     n_main: u32,
 }
 
-/// the aircraft shader specialised for one kind, without the instrument faces.
-pub struct ObjFast {
-    kind: u32,
+struct ObjPipelines {
     cut: wgpu::RenderPipeline,
     solid: wgpu::RenderPipeline,
+}
+
+impl ObjPipelines {
+    fn new(device: &wgpu::Device, layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule) -> Self {
+        Self { cut: obj_pipeline(device, layout, module, true), solid: obj_pipeline(device, layout, module, false) }
+    }
+}
+
+/// The aircraft shader specialised for one kind, without the instrument faces.
+struct ObjFast {
+    kind: u32,
+    pipes: ObjPipelines,
+}
+
+enum GenericAircraft {
+    Deferred,
+    Building(crossbeam_channel::Receiver<ObjPipelines>),
+    Ready(ObjPipelines),
+    Failed,
 }
 
 /// triangles of instrument faces (9) and displays (14) moved to the end, and where they start.
@@ -990,9 +1007,8 @@ pub struct Renderer {
     /// the same without any discard in the fragment shader (`fs_whole`)
     p_build_whole: wgpu::RenderPipeline,
     p_build_shadow: wgpu::RenderPipeline,
-    p_obj: wgpu::RenderPipeline,
+    obj_generic: GenericAircraft,
     p_obj_shadow: wgpu::RenderPipeline,
-    p_obj_solid: wgpu::RenderPipeline,
     p_obj_shadow_solid: wgpu::RenderPipeline,
     p_glass: wgpu::RenderPipeline,
     p_composite: wgpu::RenderPipeline,
@@ -1504,7 +1520,7 @@ fn wave_texture() -> Vec<u8> {
 }
 
 impl Renderer {
-    pub async fn new(window: Arc<winit::window::Window>, gfx: &mut crate::graphics::Graphics, auto_scale: bool, scale_override: Option<f32>, allow_software: bool, progress: &dyn Fn(&str)) -> anyhow::Result<Self> {
+    pub async fn new(window: Arc<winit::window::Window>, gfx: &mut crate::graphics::Graphics, auto_scale: bool, scale_override: Option<f32>, allow_software: bool, defer_aircraft: bool, progress: &dyn Fn(&str)) -> anyhow::Result<Self> {
         progress(crate::t!("Finding a graphics device", "Recherche d’un périphérique graphique"));
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface = instance.create_surface(window.clone())?;
@@ -2101,12 +2117,15 @@ impl Renderer {
         });
         let p_build_shadow = geom("build shadow", Some(&l_build), &m_build, &[vb(40, false, &A_BUILD)], 1);
         const A_PART: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x2, 4 => Float32x4];
-        progress(crate::t!("Compiling aircraft graphics", "Compilation du rendu des avions"));
-        let p_obj = geom("obj", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 0);
         let p_obj_shadow = geom("obj shadow", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 4);
-        let p_obj_solid = geom("obj solid", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 5);
         let p_obj_shadow_solid = geom("obj shadow solid", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 1);
-        let pl_obj = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_obj)], immediate_size: 0 });
+        let pl_obj = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("aircraft"), bind_group_layouts: &[Some(&l0), Some(&l_obj)], immediate_size: 0 });
+        let obj_generic = if defer_aircraft {
+            GenericAircraft::Deferred
+        } else {
+            progress(crate::t!("Compiling aircraft graphics", "Compilation du rendu des avions"));
+            GenericAircraft::Ready(ObjPipelines::new(d, &pl_obj, &m_obj))
+        };
         // Glass and the propeller blur: blended over the finished, lit scene,
         // tested against the resolved depth.
         const A_APPROACH: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
@@ -2308,7 +2327,7 @@ impl Renderer {
             gpu_timer: crate::gputime::GpuTimer::new(&device, &queue),
             globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res, bg0_src, scale: gfx.scale, ao: gfx.ao, cloud_step: gfx.cloud_step(), l_tile, l_build, l_composite, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
             tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, light_cover, light_cover_view, glow_tex, gclouds_tex, globe_relief, build_ub, obj_ub, bg_obj, l_obj, paint_ub, tile_ibuf, tile_nidx: ix.len() as u32,
-            p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_idx, tess_buf, tess_cap, cell_ibuf, p_build, p_build_whole, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, obj_src, pl_obj, obj_fast: None, obj_fast_rx: None, p_glass, p_composite, p_composite_edge, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit, p_logo,
+            p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_idx, tess_buf, tess_cap, cell_ibuf, p_build, p_build_whole, p_build_shadow, obj_generic, p_obj_shadow, p_obj_shadow_solid, obj_src, pl_obj, obj_fast: None, obj_fast_rx: None, p_glass, p_composite, p_composite_edge, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit, p_logo,
             psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, logo_font: crate::logo::find_font(), logo_key: None, surface, config, queue, device, stats: [0.0; 4], headless: false, presented: false, integrated,
         })
     }
@@ -2602,9 +2621,54 @@ impl Renderer {
         let bind = self.meshes[i].bind.take();
         self.meshes[i] = self.mesh_gpu(verts, idx, bind);
     }
+    /// Start the full aircraft pipeline pair on demand. The menus use stills
+    /// and previews independently, so they can open before driver compilation.
+    pub(crate) fn prepare_aircraft(&mut self) -> bool {
+        match &self.obj_generic {
+            GenericAircraft::Ready(_) => return true,
+            GenericAircraft::Failed => return false,
+            GenericAircraft::Building(rx) => {
+                match rx.try_recv() {
+                    Ok(pipes) => {
+                        self.obj_generic = GenericAircraft::Ready(pipes);
+                        return true;
+                    }
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                        self.obj_generic = GenericAircraft::Failed;
+                        log::error!("aircraft graphics compiler stopped unexpectedly");
+                    }
+                    Err(crossbeam_channel::TryRecvError::Empty) => {}
+                }
+                return false;
+            }
+            GenericAircraft::Deferred => {}
+        }
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let (d, src, layout) = (self.device.clone(), self.obj_src.clone(), self.pl_obj.clone());
+        let worker = std::thread::Builder::new().name("aircraft graphics".into()).spawn(move || {
+            let start = std::time::Instant::now();
+            log::info!("Compiling aircraft graphics for flight");
+            let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("generic aircraft"), source: wgpu::ShaderSource::Wgsl(src.as_str().into()),
+            });
+            let pipes = ObjPipelines::new(&d, &layout, &module);
+            log::info!("Aircraft graphics ready in {:.1}s", start.elapsed().as_secs_f64());
+            let _ = tx.send(pipes);
+        });
+        self.obj_generic = match worker {
+            Ok(_) => GenericAircraft::Building(rx),
+            Err(err) => {
+                log::error!("could not start aircraft graphics compiler: {err}");
+                GenericAircraft::Failed
+            }
+        };
+        false
+    }
+
     /// ask for the aircraft shader specialised to `kind`, built on a worker thread.
     /// until it is ready the generic pipelines draw everything.
     pub(crate) fn want_obj_kind(&mut self, kind: u32) {
+        if !self.prepare_aircraft() { return; }
         if let Some((k, rx)) = &self.obj_fast_rx {
             if let Ok(f) = rx.try_recv() {
                 self.obj_fast = Some(f);
@@ -2621,7 +2685,7 @@ impl Renderer {
         let spawned = std::thread::Builder::new().name("obj shader".into()).spawn(move || {
             let t = std::time::Instant::now();
             let m = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("plane fast"), source: wgpu::ShaderSource::Wgsl(specialise(&src, kind).into()) });
-            let f = ObjFast { kind, cut: obj_pipeline(&d, &pl, &m, true), solid: obj_pipeline(&d, &pl, &m, false) };
+            let f = ObjFast { kind, pipes: ObjPipelines::new(&d, &pl, &m) };
             log::info!("aircraft shader for kind {kind} ready in {:.1} s", t.elapsed().as_secs_f64());
             let _ = tx.send(f);
         });
@@ -2720,6 +2784,13 @@ impl Renderer {
         if let Some(o) = f.objs.iter().find(|o| !o.glass) {
             self.want_obj_kind(o.glow[1].round().max(0.0) as u32);
         }
+        let generic = match &self.obj_generic {
+            GenericAircraft::Ready(pipes) => Some(pipes),
+            _ => {
+                f.objs.clear();
+                None
+            }
+        };
         let sview = frame.as_ref().map(|f| f.texture.create_view(&Default::default()));
         let q = &self.queue;
         let render_clouds = f.g.start[0] > -1.0 && f.g.start[0] <= 0.0;
@@ -3184,10 +3255,10 @@ impl Renderer {
                         rp.set_pipeline(match (shadow, want) {
                             (true, 1) => &self.p_obj_shadow,
                             (true, _) => &self.p_obj_shadow_solid,
-                            (false, 1) => &self.p_obj,
-                            (false, 0) => &self.p_obj_solid,
-                            (false, 3) => &fast.expect("fast").cut,
-                            (false, _) => &fast.expect("fast").solid,
+                            (false, 1) => &generic.expect("aircraft graphics ready").cut,
+                            (false, 0) => &generic.expect("aircraft graphics ready").solid,
+                            (false, 3) => &fast.expect("fast").pipes.cut,
+                            (false, _) => &fast.expect("fast").pipes.solid,
                         });
                         cur = Some(want);
                     }

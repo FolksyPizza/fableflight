@@ -1503,7 +1503,9 @@ impl Game {
         let auto_scale = saved_gfx.is_none() && args.graphics.is_none();
         let allow_software = args.headless || args.record.is_some() || !args.shots.is_empty()
             || std::env::var_os("FABLE_ALLOW_SOFTWARE").is_some();
-        let mut r = pollster::block_on(Renderer::new(window.clone(), &mut gfx, auto_scale, args.render_scale, allow_software, progress))?;
+        let defer_aircraft = cfg!(target_os = "linux") && args.menu != Some(false)
+            && !args.headless && args.shots.is_empty() && args.record.is_none();
+        let mut r = pollster::block_on(Renderer::new(window.clone(), &mut gfx, auto_scale, args.render_scale, allow_software, defer_aircraft, progress))?;
         progress(t!("Preparing aircraft and scenery", "Préparation de l’avion et du décor"));
         let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame");
         r.headless = args.headless;
@@ -2170,10 +2172,11 @@ impl Game {
         let photo = self.world.photo();
         let (lat, lon, _) = geo::pos_to_lla(self.plane.pos);
         let t = now.saturating_duration_since(l.t0).as_secs_f64();
-        let aircraft_ready = self.r.departure_aircraft_ready(self.spec.id as u32);
+        let graphics_ready = self.r.prepare_aircraft();
+        let aircraft_ready = graphics_ready && self.r.departure_aircraft_ready(self.spec.id as u32);
         if l.try_begin_descent(
             now,
-            self.departure_terrain >= 1.0 && self.world.departure_ready(lat, lon),
+            graphics_ready && self.departure_terrain >= 1.0 && self.world.departure_ready(lat, lon),
             !photo.active || photo.stats.2 == 0,
             aircraft_ready,
         ) {
