@@ -155,6 +155,24 @@ fn globe_texel(n: vec3f, dist: f32) -> vec4f {
   return textureSampleLevel(t_globe, s_repeat, globe_uv(n), lod);
 }
 
+// Light the visible slopes using the local elevation atlas. The exaggerated
+// normal is an orbital relief cue, and fades before the true terrain takes over.
+fn globe_relief_normal(n: vec3f, distance: f32, water: f32) -> vec3f {
+  let strength = (1.0 - water) * smoothstep(40000.0, 160000.0, distance);
+  if (strength < 0.001 || abs(n.z) > 0.9999) { return n; }
+  let uv = globe_uv(n);
+  let dx = vec2f(1.0 / f32(textureDimensions(t_gclouds).x), 0.0);
+  let dy = vec2f(0.0, 1.0 / f32(textureDimensions(t_gclouds).y));
+  let e = textureSampleLevel(t_gclouds, s_repeat, uv + dx, 0.0).g;
+  let w = textureSampleLevel(t_gclouds, s_repeat, uv - dx, 0.0).g;
+  let n0 = textureSampleLevel(t_gclouds, s_repeat, uv - dy, 0.0).g;
+  let s0 = textureSampleLevel(t_gclouds, s_repeat, uv + dy, 0.0).g;
+  let east = normalize(vec3f(-n.y, n.x, 0.0));
+  let north = cross(n, east);
+  let slope = east * ((e * e - w * w) / max(length(n.xy), 0.22)) + north * (n0 * n0 - s0 * s0);
+  return normalize(n - slope * (strength * 1.15));
+}
+
 fn globe_water(texel: vec3f) -> f32 {
   // Fractional coverage retains the filtered coastal pixels at local zoom.
   let blue = smoothstep(0.002, 0.005, texel.b) * (1.0 - smoothstep(0.009, 0.017, texel.b));
@@ -293,7 +311,8 @@ fn globe_sky(rd: vec3f, jit: f32) -> vec3f {
     let mu = dot(n, G.sun_dir.xyz);
     let texel = globe_texel(n, gnd.x);
     let water = globe_water(texel.rgb);
-    let light = globe_amb(mu) + globe_sun(mu, 0.0) * (max(mu, 0.0) / PI);
+    let lit_normal = globe_relief_normal(n, gnd.x, water);
+    let light = globe_amb(mu) + globe_sun(mu, 0.0) * (max(dot(lit_normal, G.sun_dir.xyz), 0.0) / PI);
     let cities = vec3f(1.0, 0.68, 0.40) * (texel.a * night_at(n) * G.sun_dir.w * 0.25);
     let albedo = texel.rgb * light + cities;
     let surface = globe_surface(p, rd, albedo, water, jit);

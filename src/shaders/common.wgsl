@@ -1745,7 +1745,11 @@ fn photo_hides(P: vec3f, px: vec2f) -> bool {
 // scene (a picked spot seen close up), from GLOBE_HI the planet from orbit.
 const GLOBE_LO = 150000.0;
 const GLOBE_HI = 800000.0;
-fn globe_k() -> f32 { return select(0.0, smoothstep(GLOBE_LO, GLOBE_HI, G.up.w), G.start.x > 0.0); }
+fn globe_k() -> f32 {
+  let orbital = select(0.0, smoothstep(GLOBE_LO, GLOBE_HI, G.up.w), G.start.x > 0.0);
+  let planner = select(0.0, 1.0 - G.detail.w, G.start.x > 1.5);
+  return max(orbital, planner);
+}
 
 // Readable satellite fallback until the flight terrain covers the ground ray.
 // Return scene-linear colour for the current exposure.

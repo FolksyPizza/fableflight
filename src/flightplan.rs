@@ -30,7 +30,12 @@ fn heading_for_track(course: f64, state: &State) -> f64 {
 
 impl Game {
     pub(crate) fn update_flight_plan(&mut self, state: &State) {
-        if !self.flight_plan.follow || self.ap.lat != Lat::Hdg {
+        if !self.flight_plan.follow {
+            return;
+        }
+        if self.ap.lat != Lat::Hdg {
+            self.flight_plan.follow = false;
+            self.flight_plan.message = None;
             return;
         }
         if let Some(&next) = self.flight_plan.airports.front()
@@ -46,7 +51,12 @@ impl Game {
         let target = airport_pos(next);
         if range(self.plane.pos, target) < (state.gs * 18.0).clamp(1_200.0, 4_000.0) {
             self.flight_plan.follow = false;
-            self.flight_plan.message = Some(t!("Destination reached. Heading and altitude hold.", "Destination atteinte. Maintien du cap et de l’altitude.").into());
+            self.ap.hdg = state.hdg;
+            self.flight_plan.message = Some(if self.ap.vert == Vert::Vs {
+                t!("Destination reached · Heading hold, completing altitude capture", "Destination atteinte · Maintien du cap, capture de l’altitude en cours")
+            } else {
+                t!("Destination reached · Heading hold", "Destination atteinte · Maintien du cap")
+            }.into());
         } else {
             self.ap.hdg = heading_for_track(nav::bearing(self.plane.pos, target), state);
         }
@@ -171,6 +181,9 @@ impl Game {
             });
         }
         if let Some(index) = remove {
+            if index + 1 == self.flight_plan.airports.len() {
+                self.flight_plan.runway.clear();
+            }
             self.flight_plan.airports.remove(index);
             self.flight_plan.auto_ils = None;
             self.flight_plan.follow = false;

@@ -826,13 +826,31 @@ struct DepartureIntro {
     elapsed: f64,
     motion_start: f64,
     motion_duration: f64,
+    planner_terrain: f32,
+    long_transfer: Option<menu::GlobeFocus>,
 }
 
 impl DepartureIntro {
     const DURATION: f64 = 1.70;
 
     fn new(from: DVec3, eye: DVec3) -> Self {
-        Self { from, eye, elapsed: 0.0, motion_start: 0.0, motion_duration: Self::DURATION }
+        let long_transfer = Self::transfer(from, eye);
+        let motion_duration = long_transfer.as_ref().map_or(Self::DURATION, menu::GlobeFocus::duration);
+        Self { from, eye, elapsed: 0.0, motion_start: 0.0, motion_duration, planner_terrain: 0.0, long_transfer }
+    }
+
+    fn transfer(from: DVec3, eye: DVec3) -> Option<menu::GlobeFocus> {
+        let (start, end) = (from.normalize(), eye.normalize());
+        (start.angle_between(end) > 0.30).then(|| {
+            menu::GlobeFocus::new(start, end, (from.length() - geo::R).max(1.0), (eye.length() - geo::R).max(1.0))
+        })
+    }
+
+    fn advance(&mut self, dt: f64) {
+        self.elapsed += dt.min(0.1);
+        if let Some(transfer) = &mut self.long_transfer {
+            transfer.elapsed = self.elapsed - self.motion_start;
+        }
     }
 
     fn retarget(&mut self, eye: DVec3) {
@@ -843,7 +861,8 @@ impl DepartureIntro {
         self.from = self.camera();
         self.eye = eye;
         self.motion_start = self.elapsed;
-        self.motion_duration = (Self::DURATION - self.elapsed).max(0.55);
+        self.long_transfer = Self::transfer(self.from, self.eye);
+        self.motion_duration = self.long_transfer.as_ref().map_or((Self::DURATION - self.elapsed).max(0.55), menu::GlobeFocus::duration);
     }
 
     fn settled(&self) -> bool {
@@ -852,6 +871,9 @@ impl DepartureIntro {
 
     fn camera(&self) -> DVec3 {
         let to = self.eye;
+        if let Some(transfer) = &self.long_transfer {
+            return transfer.direction() * (geo::R + transfer.altitude((to.length() - geo::R).max(1.0)));
+        }
         let progress = (self.elapsed - self.motion_start) / self.motion_duration;
         let turn_progress = Loading::ease(progress / 0.84);
         let altitude_progress = Loading::ease((progress - 0.10) / 0.90);
@@ -880,10 +902,10 @@ struct Loading {
 }
 impl Loading {
     const MIN: f64 = 1.2;
-    const PHOTO_WAIT: f64 = 45.0;
-    const AIRCRAFT_SHADER_WAIT: f64 = 12.0;
+    const PHOTO_WAIT: f64 = 180.0;
+    const AIRCRAFT_SHADER_WAIT: f64 = 45.0;
     const DESCENT: f64 = 6.2;
-    const SCENERY_VIEWS: [f64; 8] = [0.0, 0.18, 0.30, 0.42, 0.53, 0.65, 0.78, 0.90];
+    const SCENERY_VIEWS: [f64; 10] = [0.0, 0.14, 0.24, 0.35, 0.44, 0.53, 0.63, 0.73, 0.83, 0.92];
 
     fn new(eye: DVec3) -> Self {
         Self { t0: Instant::now(), quiet_since: None, descent: None, descent_time: 0.0, eye, handoff: None }
@@ -907,7 +929,7 @@ impl Loading {
         let ready = map_ready && (photo_ready || elapsed >= Self::PHOTO_WAIT)
             && (aircraft_ready || elapsed >= Self::AIRCRAFT_SHADER_WAIT);
         self.quiet_since = ready.then(|| self.quiet_since.unwrap_or(now));
-        if elapsed > Self::MIN && self.quiet_since.is_some_and(|q| now.saturating_duration_since(q).as_secs_f64() > 0.6) {
+        if elapsed > Self::MIN && self.quiet_since.is_some_and(|q| now.saturating_duration_since(q).as_secs_f64() > 1.0) {
             self.descent = Some(now);
             true
         } else {
@@ -999,10 +1021,10 @@ mod departure_tests {
     #[test]
     fn departure_waits_for_map_and_caps_camera_steps_after_a_stall() {
         let mut loading = Loading::new(DVec3::X);
-        let later = loading.t0 + std::time::Duration::from_secs(120);
+        let later = loading.t0 + std::time::Duration::from_secs(181);
         assert!(!loading.try_begin_descent(later, false, true, true));
         assert!(!loading.try_begin_descent(later, true, false, false));
-        let ready = later + std::time::Duration::from_secs(1);
+        let ready = later + std::time::Duration::from_secs(2);
         assert!(loading.try_begin_descent(ready, true, false, false));
         assert_eq!(loading.progress(), Some(0.0));
         assert!(!loading.advance_descent(ready + std::time::Duration::from_secs(4)));
@@ -1013,11 +1035,29 @@ mod departure_tests {
     fn departure_waits_for_the_aircraft_shader_with_a_generic_fallback() {
         let mut loading = Loading::new(DVec3::X);
         let second = |n| loading.t0 + std::time::Duration::from_secs(n);
-        let (two, three, twelve, thirteen) = (second(2), second(3), second(12), second(13));
+        let (two, four, forty_five, forty_seven) = (second(2), second(4), second(45), second(47));
         assert!(!loading.try_begin_descent(two, true, true, false));
-        assert!(!loading.try_begin_descent(three, true, true, false));
-        assert!(!loading.try_begin_descent(twelve, true, true, false));
-        assert!(loading.try_begin_descent(thirteen, true, true, false));
+        assert!(!loading.try_begin_descent(four, true, true, false));
+        assert!(!loading.try_begin_descent(forty_five, true, true, false));
+        assert!(loading.try_begin_descent(forty_seven, true, true, false));
+    }
+
+    #[test]
+    fn starting_during_a_distant_search_stays_high_during_the_turn() {
+        let origin = geo::lla_to_pos(48.86_f64.to_radians(), 2.35_f64.to_radians(), 1_200.0);
+        let destination = geo::lla_to_pos(37.62_f64.to_radians(), -122.38_f64.to_radians(), 14_000.0);
+        let mut intro = DepartureIntro::new(origin, destination);
+        for _ in 0..600 {
+            intro.advance(0.01);
+            let eye = intro.camera();
+            if eye.normalize().angle_between(origin.normalize()) > 0.01
+                && eye.normalize().angle_between(destination.normalize()) > 0.01
+            {
+                assert!(eye.length() - geo::R > 3_000_000.0);
+            }
+        }
+        assert!(intro.settled());
+        assert!(intro.camera().distance(destination) < 1e-6);
     }
 
     #[test]
@@ -1392,6 +1432,7 @@ struct Game {
     briefing_exit: Option<(DVec3, f64)>,
     menu_overlay: Vec<egui::epaint::ClippedShape>,
     departure_terrain: f32,
+    planner_terrain: f32,
     flight_ui_since: f64,
     scenery_cache: settings_ui::SceneryCache,
     name_rx: Option<std::sync::mpsc::Receiver<String>>,
@@ -1633,7 +1674,7 @@ impl Game {
             g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, quit: false,
             mode: if args.menu.unwrap_or(true) { Mode::Menu } else { Mode::Fly }, menu, menu_go: args.menu_go, heading: args.heading.to_radians(), destr: destruct::Destruction::new(secs.to_bits()),
             sheds: damage::Sheds::default(), fx_anchor: plane.pos, fx_shift: DVec3::ZERO, smoke_acc: 0.0, flash: Vec::new(), airport_note: (String::new(), -100.0), toolbar_t: -100.0, toolbar_hover_blocked: false, weapon_flash: None, kills: Vec::new(), damage_spec: args.damage.clone(), wreck_dirty: false, wreck_t: 0.0, wreck_seen: 0.0,
-            start_rx: None, loading: None, departure_intro: None, preflight: None, walkaround: None, preflight_step_since: -100.0, preflight_cockpit: false, briefing_exit: None, menu_overlay: Vec::new(), departure_terrain: 1.0, flight_ui_since: -100.0, scenery_cache: Default::default(), name_rx: None, last_click: -10.0, n_cars: 0, city_glow: 0.0, skyglow: Default::default(), gauges: gauges::Gauges::new(&plane, secs.to_bits()), glass, lightning, rain_field: storm::RainField::default(), cam_rain: 0.0, cam_hail: 0.0, storm_adapt: 0.0, plane, weapons,
+            start_rx: None, loading: None, departure_intro: None, preflight: None, walkaround: None, preflight_step_since: -100.0, preflight_cockpit: false, briefing_exit: None, menu_overlay: Vec::new(), departure_terrain: 1.0, planner_terrain: 0.0, flight_ui_since: -100.0, scenery_cache: Default::default(), name_rx: None, last_click: -10.0, n_cars: 0, city_glow: 0.0, skyglow: Default::default(), gauges: gauges::Gauges::new(&plane, secs.to_bits()), glass, lightning, rain_field: storm::RainField::default(), cam_rain: 0.0, cam_hail: 0.0, storm_adapt: 0.0, plane, weapons,
             airport_rx: None, hold_spot: None, runway_steering: None, runway_assist: prefs.runway_assist, keyboard_rudder: prefs.keyboard_rudder, keyboard_rudder_fine: prefs.keyboard_rudder_fine, remember_start: prefs.remember_start,
             prefs_lang: args.lang.or(prefs.lang),
             prefs_t: 0.0,
@@ -4286,7 +4327,7 @@ impl Game {
     /// Menu: choose an airport to start at.
     fn choose_airport(&mut self, i: u32) {
         let a = &airports::Db::get().apts[i as usize];
-        self.menu.look_at(a.lat, a.lon, self.menu.alt.min(25_000.0));
+        self.menu.look_at(a.lat, a.lon, 25_000.0);
         self.menu.pick = Some((a.lat, a.lon));
         self.menu.pick_name = format!("{} {} ({}, {})", a.code(), a.name, a.city, a.country);
         if self.menu.airport != Some(i) {
@@ -4324,7 +4365,9 @@ impl Game {
         self.set_aircraft(aircraft::nth(self.menu.aircraft));
         self.r.want_obj_kind(self.spec.id as u32);
         self.departure_terrain = 0.0;
-        self.departure_intro = Some(DepartureIntro::new(self.menu.camera().0, self.departure_eye()));
+        let mut intro = DepartureIntro::new(self.menu.camera().0, self.departure_eye());
+        intro.planner_terrain = self.planner_terrain;
+        self.departure_intro = Some(intro);
         // Remembered for next time (the globe opens on it; the main menu offers it again).
         let db = airports::Db::get();
         self.last_start = self.remember_start.then(|| settings::LastStart {
@@ -4964,7 +5007,7 @@ impl Game {
         self.last = now;
         self.real += dt_real;
         if let Some(intro) = &mut self.departure_intro {
-            intro.elapsed += dt_real;
+            intro.advance(dt_real);
             if intro.menu_opacity() == 0.0 {
                 self.menu_overlay.clear();
             }
@@ -5496,6 +5539,9 @@ impl Game {
                 let (_, north, up) = geo::enu(eye);
                 (eye, -up, north)
             } else if self.menu.screen == menu::Screen::Fly {
+                if self.menu.preview_pending() {
+                    self.planner_terrain = (self.planner_terrain - (dt_real as f32).min(0.05) / 0.36).max(0.0);
+                }
                 self.menu.update(dt_real);
                 self.menu.camera()
             } else {
@@ -5658,7 +5704,7 @@ impl Game {
         let preparing = self.loading.is_some_and(|l| l.descent.is_none());
         let departure_visibility = if departing {
             self.loading.and_then(Loading::progress)
-                .map_or(0.0, |p| Loading::ease((p - 0.24) / 0.52) as f32)
+                .map_or(0.0, |p| Loading::ease((p - 0.38) / 0.56) as f32)
         } else {
             Loading::ease((self.real - self.flight_ui_since) / 0.38) as f32
         };
@@ -5736,7 +5782,25 @@ impl Game {
         let distant_intro = intro && calt >= 800_000.0;
         let orbit = distant_intro || map_view && (self.menu.screen != menu::Screen::Fly || calt >= 800_000.0);
         let focus_abs = if in_menu { cam } else if self.crashed { self.crash.as_ref().unwrap().site } else { self.plane.pos };
-        if orbit {
+        let planner_map = map_view && self.menu.screen == menu::Screen::Fly;
+        let planner_preview = planner_map.then(|| self.menu.preview_camera()).flatten();
+        if let Some((eye, direction, up)) = planner_preview {
+            // The globe can keep moving while scenery prepares near the final
+            // map camera. A wider view covers the easing into that camera.
+            let vp = perspective_rev(75f32.to_radians(), w / h, flight_near)
+                * look_to(Vec3::ZERO, direction.as_vec3(), up.as_vec3());
+            let view = world::Frustum::new(DMat4::from_cols_array(&vp.to_cols_array().map(f64::from)));
+            self.world.update(&self.r, eye, &view, &[], false, self.menu.airport, None);
+            let (lat, lon, _) = geo::pos_to_lla(eye);
+            if self.world.departure_ready(lat, lon) {
+                self.menu.finish_preview();
+            }
+            if orbit {
+                self.world.clear_draws();
+            } else {
+                self.world.show_departure_from(cam, &frustum);
+            }
+        } else if orbit {
             self.world.clear_draws();
         } else {
             let (stream_cam, stream_frustum, stream_fov) = if loading {
@@ -5752,7 +5816,7 @@ impl Game {
                     let (cam, direction, up) = l.camera(t, eye, dir, up, cockpit_view);
                     let fov = 60f32.to_radians() + (final_fov - 60f32.to_radians()) * Loading::ease(t) as f32;
                     // Cover the views between the samples, plus a margin at the image edge.
-                    let buffered_fov = (fov + 12f32.to_radians()).min(150f32.to_radians());
+                    let buffered_fov = (fov + 16f32.to_radians()).min(150f32.to_radians());
                     let vp = perspective_rev(buffered_fov, w / h, flight_near) * look_to(Vec3::ZERO, direction.as_vec3(), up.as_vec3());
                     (cam, world::Frustum::new(DMat4::from_cols_array(&vp.to_cols_array().map(f64::from))))
                 })
@@ -5769,10 +5833,15 @@ impl Game {
                 self.world.show_departure_from(cam, &frustum);
             }
         }
+        if planner_map && !self.menu.preview_pending() && self.planner_terrain < 1.0
+            && (planner_preview.is_some() || !orbit && self.world.departure_ready(clat, clon))
+        {
+            self.planner_terrain = (self.planner_terrain + (dt_real as f32).min(0.05) / 0.7).min(1.0);
+        }
         if waiting_above && !distant_intro {
             let (lat, lon, _) = geo::pos_to_lla(self.plane.pos);
             if self.loading.is_some() && self.world.departure_ready(lat, lon) {
-                self.departure_terrain = (self.departure_terrain + dt_real as f32 / 0.55).min(1.0);
+                self.departure_terrain = (self.departure_terrain + (dt_real as f32).min(0.05) / 0.90).min(1.0);
             }
         } else if !departing {
             self.departure_terrain = 1.0;
@@ -5863,6 +5932,16 @@ impl Game {
         }
         let mut shadow_vp = [[[0f32; 4]; 4]; 3];
         shadow_vp.copy_from_slice(&casc_vp[..3]);
+        let staged_surface = if planner_map {
+            self.planner_terrain
+        } else if waiting_above {
+            let from_planner = self.departure_intro.as_ref().map_or(0.0, |intro| {
+                intro.planner_terrain * (1.0 - Loading::ease(intro.elapsed / DepartureIntro::DURATION) as f32)
+            });
+            self.departure_terrain.max(from_planner)
+        } else {
+            1.0
+        };
         let mut g = Globals {
             view_proj: vp_jit.to_cols_array_2d(),
             inv_view_proj: vp_jit.inverse().to_cols_array_2d(),
@@ -5913,12 +5992,12 @@ impl Game {
             shore: [0.0; 4],
             foam: [[0.0; 4]; 16],
             // (yzw: the rain, how wet the windows are, and the airspeed over them in kt; plane.wgsl rain_water)
-            start: [if globe_view { 1.0 } else { departure_visibility - 1.0 }, self.wx.rain, self.glass.wet, (self.plane.ias() * 1.94384) as f32],
+            start: [if planner_map || waiting_above { 2.0 } else if globe_view { 1.0 } else { departure_visibility - 1.0 }, self.wx.rain, self.glass.wet, (self.plane.ias() * 1.94384) as f32],
             stormfx: [0.0; 4],
             flash: [[0.0; 4]; 2 * storm::MAX_FLASHES],
             rain: [[0.0; 4]; 2],
             quality: [0.0; 4],
-            detail: [self.gfx.city_k(), self.gfx.tree_imp_k(), self.gfx.tree_far(), if waiting_above { self.departure_terrain } else { 1.0 }],
+            detail: [self.gfx.city_k(), self.gfx.tree_imp_k(), self.gfx.tree_far(), staged_surface],
             nimbo: if map_view { [[0.0; 4]; 4] } else { self.wx.deck_globals() },
             glow_c: glow[0],
             glow_e: glow[1],
@@ -6470,34 +6549,28 @@ impl Game {
                     menu::window_title(ui, t!("Start location", "Lieu de départ"));
                     egui::ScrollArea::vertical().max_height(body_h).auto_shrink([false, true]).show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        let summary = if self.menu.search.trim().is_empty() { String::new() } else { self.menu.search.chars().take(18).collect() };
-                        menu::section(ui, "search", t!("Search", "Recherche"), &summary, true, |ui| {
-                            ui.horizontal(|ui| {
-                                let resp = ui.add(egui::TextEdit::singleline(&mut self.menu.search).desired_width(ui.available_width() - 56.0).hint_text(t!("City, address, or airport (SFO, EGLL)", "Ville, adresse ou aéroport (SFO, EGLL)")).margin(egui::vec2(8.0, 6.0)));
-                                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                if (ui.add(egui::Button::new(RichText::new(t!("Go", "Aller")).font(menu::body())).min_size(egui::vec2(48.0, 28.0))).clicked() || enter) && !self.menu.search.trim().is_empty() {
-                                    go = Some(self.menu.search.trim().to_string());
+                        ui.horizontal(|ui| {
+                            let resp = ui.add(egui::TextEdit::singleline(&mut self.menu.search).desired_width((ui.available_width() - 70.0).max(100.0)).hint_text(t!("City, address, or airport (SFO, EGLL)", "Ville, adresse ou aéroport (SFO, EGLL)")).margin(egui::vec2(8.0, 6.0)));
+                            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            if (ui.add(egui::Button::new(RichText::new(t!("Find", "Chercher")).font(menu::body())).min_size(egui::vec2(62.0, 28.0))).clicked() || enter) && !self.menu.search.trim().is_empty() {
+                                go = Some(self.menu.search.trim().to_string());
+                            }
+                        });
+                        // Airports matching what is typed.
+                        let hits = airports::Db::get().search(&self.menu.search, 5);
+                        if !hits.is_empty() {
+                            ui.add_space(2.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
+                                for i in hits {
+                                    let a = &airports::Db::get().apts[i as usize];
+                                    let label = format!("{}  {}", a.ident, a.name.chars().take(28).collect::<String>());
+                                    if ui.add(egui::Button::new(RichText::new(label).font(menu::caption())).selected(self.menu.airport == Some(i))).clicked() {
+                                        airport = Some(i);
+                                    }
                                 }
                             });
-                            // Airports matching what is typed.
-                            let hits = airports::Db::get().search(&self.menu.search, 5);
-                            if !hits.is_empty() {
-                                ui.add_space(2.0);
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
-                                    for i in hits {
-                                        let a = &airports::Db::get().apts[i as usize];
-                                        let label = format!("{}  {}", a.ident, a.name.chars().take(28).collect::<String>());
-                                        if ui.add(egui::Button::new(RichText::new(label).font(menu::caption())).selected(self.menu.airport == Some(i))).clicked() {
-                                            airport = Some(i);
-                                        }
-                                    }
-                                });
-                            }
-                            ui.add_space(2.0);
-                            let tip = if padui::active() { t!("Or turn the globe (left stick, triggers to zoom) and press X at the crosshair.", "Ou tournez le globe (stick gauche, gâchettes pour zoomer) et appuyez sur X au viseur.") } else { t!("Or drag the globe, scroll to zoom, and click where you want to start.", "Ou faites glisser le globe, zoomez à la molette et cliquez là où vous voulez partir.") };
-                            ui.label(RichText::new(tip).font(menu::caption()).color(DIM));
-                        });
+                        }
                         let place = menu::QUICK.iter().find(|q| self.menu.pick == Some((q.1, q.2))).map(|q| tr(q.0)).unwrap_or("");
                         menu::section(ui, "places", t!("Places", "Lieux"), place, false, |ui| {
                             ui.horizontal_wrapped(|ui| {
@@ -6539,6 +6612,12 @@ impl Game {
                             let name = if self.menu.pick_name.is_empty() { t!("Unnamed spot", "Lieu sans nom").to_string() } else { self.menu.pick_name.chars().take(90).collect() };
                             ui.add(egui::Label::new(RichText::new(name).font(menu::item_title()).color(Color32::WHITE)).wrap());
                             ui.label(RichText::new(t!("{}  ·  {} local", "{}  ·  {} heure locale", menu::latlon(lat, lon), menu::hhmm(self.menu.hour))).font(menu::caption()).color(DIM));
+                            if self.menu.preview_pending() {
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Spinner::new().size(10.0).color(DIM));
+                                    ui.label(RichText::new(t!("Preparing local map", "Préparation de la carte locale")).font(menu::caption()).color(DIM));
+                                });
+                            }
                             ui.add_space(6.0);
                             match self.menu.airport {
                                 Some(i) => {

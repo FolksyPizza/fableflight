@@ -490,18 +490,31 @@ fn pom(l: i32, wc: vec2f, Vt: vec3f, depth: f32, dx: vec2f, dy: vec2f) -> vec2f 
   return cur;
 }
 
+fn ocean_class(uv: vec2f) -> bool {
+  let dimensions = vec2i(textureDimensions(t_mask));
+  let pixel = clamp(vec2i(uv * vec2f(dimensions)), vec2i(0), dimensions - vec2i(1));
+  let m = textureLoad(t_mask, pixel, 0);
+  return m.r > 0.5 && abs(m.g * 255.0 - 80.0) < 1.0;
+}
+
 // ------------------------------------------------------------ vertices
 // sp: spacing of the vertices around this one (m): the waves are filtered to it.
 fn finish(Pin: vec3f, nrm: vec3f, uv: vec2f, depth: f32, skirt: f32, sp: f32) -> VOut {
   var P = Pin;
   let m = textureSampleLevel(t_mask, s_clamp, uv, 1.0);
   if (m.r > 0.5 && skirt < 0.5) {
+    let upn = normalize(P - G.planet.xyz);
+    let kind = m.g * 255.0 / 80.0;
+    // Tessellated ocean samples can straddle a wet mesh vertex and a high
+    // land vertex, so keep the wet surface on the planet's sea-level sphere.
+    if (ocean_class(uv) && abs(length(P - G.planet.xyz) - G.planet.w) > 1.0) {
+      P = G.planet.xyz + upn * G.planet.w;
+    }
     let d = length(P);
     let fade = 1.0 - smoothstep(2500.0, 6000.0, d);
     if (fade > 0.0) {
-      let upn = normalize(P - G.planet.xyz);
       let shore = smoothstep(0.5, 1.0, textureSampleLevel(t_mask, s_clamp, uv, 3.0).r);
-      let st = sea_state(m.g * 255.0 / 80.0, upn.z, shore);
+      let st = sea_state(kind, upn.z, shore);
       // The FFT ocean: height, and the sideways shift that sharpens the crests.
       let w = ocean_disp(ocean_coord(P), sp, st) * fade;
       P += G.east.xyz * w.x + G.north.xyz * w.y + upn * w.z;
@@ -520,8 +533,9 @@ struct TopOut { @builtin(position) clip: vec4f, @location(0) uv: vec2f, @locatio
   return TopOut(CS.vp * vec4f(P, 1.0), uv, height_of(P), skirt);
 }
 @fragment fn fs_top(in: TopOut) -> @location(0) vec4f {
-  if (in.skirt > 0.5 || textureSampleLevel(t_mask, s_clamp, in.uv, 0.0).r < 0.5) { discard; }
-  return vec4f(0.0, in.h, 0.0, 0.0);
+  let m = textureSampleLevel(t_mask, s_clamp, in.uv, 0.0);
+  if (in.skirt > 0.5 || m.r < 0.5) { discard; }
+  return vec4f(0.0, select(in.h, 0.0, ocean_class(in.uv)), 0.0, 0.0);
 }
 // Where any ground was drawn at all, into the red channel of the shore mask
 // (shore.rs): land there is ground without our water on it.

@@ -98,23 +98,64 @@ pub const AIRPORTS: &[(&str, &str)] = &[
     ("KOSH", "Oshkosh"),
 ];
 
-struct GlobeFocus {
+pub(crate) struct GlobeFocus {
     from: DVec3,
     turn: DQuat,
-    lift: f64,
-    elapsed: f64,
-    duration: f64,
+    from_alt: f64,
+    transit_alt: f64,
+    pullback: f64,
+    travel: f64,
+    descent: f64,
+    pub(crate) elapsed: f64,
+    preview_ready: bool,
 }
 
 impl GlobeFocus {
-    fn progress(&self) -> f64 {
-        (self.elapsed / self.duration).clamp(0.0, 1.0)
+    pub(crate) fn new(from: DVec3, to: DVec3, from_alt: f64, target_alt: f64) -> Self {
+        let angle = from.angle_between(to);
+        // Raise the view in place before slewing across a continent or ocean.
+        // Nearby moves also pull back when the destination is far outside a
+        // close-up view. A view already in orbit stays there through the turn.
+        let transit_alt = from_alt.max(target_alt).max((angle * geo::R * 0.48).min(8_000_000.0));
+        let zoom_time = |a: f64, b: f64| {
+            let stops = (a / b).ln().abs();
+            if stops < 0.001 { 0.0 } else { (0.25 + stops * 0.15).min(1.65) }
+        };
+        Self {
+            from, turn: DQuat::from_rotation_arc(from, to), from_alt, transit_alt,
+            pullback: zoom_time(from_alt, transit_alt),
+            travel: 0.38 + angle * 0.65,
+            descent: zoom_time(transit_alt, target_alt),
+            elapsed: 0.0, preview_ready: false,
+        }
     }
 
-    fn direction(&self) -> DVec3 {
-        let t = self.progress();
-        let mix = t * t * t * (t * (6.0 * t - 15.0) + 10.0);
+    fn ease(t: f64) -> f64 {
+        let t = t.clamp(0.0, 1.0);
+        t * t * t * (t * (6.0 * t - 15.0) + 10.0)
+    }
+
+    pub(crate) fn direction(&self) -> DVec3 {
+        let mix = Self::ease((self.elapsed - self.pullback) / self.travel);
         DQuat::IDENTITY.slerp(self.turn, mix) * self.from
+    }
+
+    pub(crate) fn duration(&self) -> f64 { self.pullback + self.travel + self.descent }
+
+    fn settled(&self) -> bool { self.elapsed >= self.duration() }
+
+    pub(crate) fn altitude(&self, target: f64) -> f64 {
+        let mix_alt = |a: f64, b: f64, t: f64| a * ((b / a).ln() * Self::ease(t)).exp();
+        let turn_end = self.pullback + self.travel;
+        if self.elapsed < self.pullback {
+            mix_alt(self.from_alt, self.transit_alt, self.elapsed / self.pullback)
+        } else if self.elapsed <= turn_end {
+            self.transit_alt
+        } else if self.descent > 0.0 {
+            mix_alt(self.transit_alt, target, (self.elapsed - turn_end) / self.descent)
+        } else {
+            target
+        }
     }
 }
 
@@ -224,14 +265,10 @@ impl Menu {
     pub fn look_at(&mut self, lat: f64, lon: f64, alt: f64) {
         let from = self.footprint();
         let to = geo::lla_to_pos(lat.to_radians(), lon.to_radians(), 0.0).normalize();
-        let angle = from.angle_between(to);
-        self.focus = (angle > 0.002).then(|| GlobeFocus {
-            from, turn: DQuat::from_rotation_arc(from, to), elapsed: 0.0,
-            duration: 0.55 + angle.min(1.45) * 0.52,
-            lift: (angle * geo::R * 0.36 - self.alt).clamp(0.0, 4_000_000.0),
-        });
-        (self.lat, self.lon, self.target_alt) = (lat, lon, alt.max(1.0));
-        self.alt = self.alt.max(self.target_alt);
+        let target_alt = alt.max(1.0);
+        self.focus = (from.angle_between(to) > 0.002)
+            .then(|| GlobeFocus::new(from, to, self.alt.max(1.0), target_alt));
+        (self.lat, self.lon, self.target_alt) = (lat, lon, target_alt);
         self.spin = 0.0;
     }
 
@@ -254,30 +291,47 @@ impl Menu {
         )
     }
 
+    pub fn preview_pending(&self) -> bool {
+        self.focus.as_ref().is_some_and(|focus| !focus.preview_ready)
+    }
+
+    pub fn preview_camera(&self) -> Option<(DVec3, DVec3, DVec3)> {
+        if self.focus.is_none() || self.target_alt >= 800_000.0 { return None; }
+        let cam = geo::lla_to_pos(self.lat.to_radians(), self.lon.to_radians(), self.target_alt);
+        let (_, north, up) = geo::enu(cam);
+        Some((cam, -up, north))
+    }
+
+    pub fn finish_preview(&mut self) {
+        if let Some(focus) = &mut self.focus { focus.preview_ready = true; }
+    }
+
     /// Eye position and the view basis (direction, up).
     pub fn camera(&self) -> (DVec3, DVec3, DVec3) {
-        let lift = self.focus.as_ref().map_or(0.0, |focus| {
-            focus.lift * (focus.progress() * std::f64::consts::PI).sin().powi(2)
-        });
-        let cam = self.footprint() * (geo::R + self.alt + lift);
+        let cam = self.footprint() * (geo::R + self.alt);
         let (_, n, u) = geo::enu(cam);
         (cam, -u, n)
     }
 
     pub fn update(&mut self, dt: f64) {
-        // Zoom at a constant rate in log-height so near and orbital moves have
-        // the same response and never rush through the last few kilometres.
-        let blend = -(-dt * 5.5).exp_m1();
-        self.alt = self.alt.max(1.0);
-        self.alt *= ((self.target_alt / self.alt).ln() * blend).exp();
         if let Some(focus) = &mut self.focus {
-            focus.elapsed += dt;
-            if focus.elapsed >= focus.duration {
-                self.focus = None;
+            focus.elapsed += dt.min(0.1);
+            if !focus.preview_ready && self.target_alt < 800_000.0 {
+                focus.elapsed = focus.elapsed.min(focus.pullback + focus.travel);
             }
-        }
-        if (self.target_alt - self.alt).abs() < 0.5 {
-            self.alt = self.target_alt;
+            self.alt = focus.altitude(self.target_alt);
+            if focus.settled() {
+                self.focus = None;
+                self.alt = self.target_alt;
+            }
+        } else {
+            // Use the same zoom response at both orbital and regional scales.
+            let blend = -(-dt * 5.5).exp_m1();
+            self.alt = self.alt.max(1.0);
+            self.alt *= ((self.target_alt / self.alt).ln() * blend).exp();
+            if (self.target_alt - self.alt).abs() < 0.5 {
+                self.alt = self.target_alt;
+            }
         }
         // The globe drifts slowly (0.3°/s, so the opening view stays on the
         // day side for minutes) until you drag, zoom or pick on it.
@@ -287,8 +341,16 @@ impl Menu {
     }
 
     pub fn zoom(&mut self, d: f64) {
+        self.interrupt_focus();
         self.target_alt = (self.target_alt * 0.82f64.powf(d)).clamp(900.0, 2.6e7);
         self.spin = 0.0;
+    }
+
+    fn interrupt_focus(&mut self) {
+        if let Some(focus) = self.focus.take() {
+            let (lat, lon, _) = geo::pos_to_lla(focus.direction() * geo::R);
+            (self.lat, self.lon, self.target_alt) = (lat.to_degrees(), lon.to_degrees(), self.alt);
+        }
     }
 
     /// Metres on the ground per screen pixel, at the centre of the view.
@@ -297,10 +359,7 @@ impl Menu {
     }
 
     pub fn drag(&mut self, dx: f64, dy: f64, h: f64, fov: f64) {
-        if let Some(focus) = self.focus.take() {
-            let (lat, lon, _) = geo::pos_to_lla(focus.direction() * geo::R);
-            (self.lat, self.lon) = (lat.to_degrees(), lon.to_degrees());
-        }
+        self.interrupt_focus();
         let mpp = self.metres_per_pixel(h, fov);
         self.lat = (self.lat + (dy * mpp / geo::R).to_degrees()).clamp(-84.0, 84.0);
         self.lon -= (dx * mpp / (geo::R * self.lat.to_radians().cos().max(0.15))).to_degrees();
@@ -1235,14 +1294,57 @@ mod tests {
         let original = globe.camera().0.normalize();
         globe.look_at(12.0, -179.0, 25_000.0);
         assert!(globe.camera().0.normalize().distance(original) < 1e-9);
-        globe.update(0.28);
+        for _ in 0..28 { globe.update(0.01); }
         assert!(geo::pos_to_lla(globe.camera().0).1.to_degrees().abs() > 179.3);
-        globe.update(2.0);
+        globe.finish_preview();
+        for _ in 0..250 { globe.update(0.01); }
         assert!((geo::pos_to_lla(globe.camera().0).1.to_degrees() + 179.0).abs() < 1e-7);
         globe.reset_globe(12.0);
         assert_eq!(globe.alt, Menu::ORBIT_ALT);
         assert_eq!(globe.lon, day_side_lon(12.0));
         assert!(globe.focus.is_none());
+    }
+
+    #[test]
+    fn distant_airport_search_climbs_turns_then_zooms() {
+        let mut globe = Menu::new(48.86, 2.35, 12.0);
+        globe.alt = 1_200.0;
+        let origin = globe.camera().0.normalize();
+        let sfo = geo::lla_to_pos(37.62_f64.to_radians(), -122.38_f64.to_radians(), 0.0).normalize();
+        globe.look_at(37.62, -122.38, 25_000.0);
+        let focus = globe.focus.as_ref().unwrap();
+        let (pullback, travel) = (focus.pullback, focus.travel);
+        assert_eq!(globe.alt, 1_200.0);
+        globe.finish_preview();
+        for frame in 0..480 {
+            globe.update(0.01);
+            let t = (frame + 1) as f64 * 0.01;
+            let point = globe.camera().0.normalize();
+            if t < pullback {
+                assert!(point.distance(origin) < 1e-9);
+            } else if t < pullback + travel {
+                assert!(globe.alt > 3_000_000.0);
+            } else {
+                assert!(point.distance(sfo) < 1e-9);
+            }
+        }
+        assert_eq!(globe.alt, 25_000.0);
+        assert!(globe.focus.is_none());
+    }
+
+    #[test]
+    fn airport_zoom_waits_above_the_destination_preview() {
+        let mut globe = Menu::new(48.86, 2.35, 12.0);
+        globe.alt = 1_200.0;
+        globe.look_at(37.62, -122.38, 25_000.0);
+        for _ in 0..600 { globe.update(0.01); }
+        let (destination, _, _) = globe.preview_camera().unwrap();
+        assert!(globe.camera().0.normalize().distance(destination.normalize()) < 1e-9);
+        assert!(globe.alt > 3_000_000.0);
+        globe.finish_preview();
+        for _ in 0..250 { globe.update(0.01); }
+        assert!(globe.camera().0.distance(destination) < 1e-6);
+        assert!(globe.preview_camera().is_none());
     }
 
     #[test]

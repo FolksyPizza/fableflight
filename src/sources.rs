@@ -1309,6 +1309,19 @@ fn fallback_imagery(id: TileId, mask: &[u8]) -> image::RgbaImage {
     })
 }
 
+/// Remove a single bad height sample only when its full neighbourhood
+/// agrees. Sustained slopes, ridges, cliffs and water edges keep their shape.
+fn clean_land_spike(height: f32, neighbours: [f32; 8], spacing: f32) -> f32 {
+    let lo = neighbours.into_iter().fold(f32::INFINITY, f32::min);
+    let hi = neighbours.into_iter().fold(f32::NEG_INFINITY, f32::max);
+    let threshold = (spacing * 0.18).clamp(8.0, 24.0);
+    if hi - lo <= threshold * 0.65 && (height > hi + threshold || height < lo - threshold) {
+        neighbours.into_iter().sum::<f32>() / 8.0
+    } else {
+        height
+    }
+}
+
 pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
     // read before the image, so a switch while this tile loads still refreshes it
     let imagery_gen = src.google.generation();
@@ -1403,17 +1416,37 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
     let e = GV + 2;
     let mut pts = vec![DVec3::ZERO; e * e];
     let mut hs = vec![(0f32, 0f32, false); e * e]; // surface height, raw elevation, water
+    let spacing = (id.width_m() / GRID as f64) as f32;
+    let grid_uv = |i: usize, j: usize| ((i as f64 - 1.0) / GRID as f64, (j as f64 - 1.0) / GRID as f64);
     for j in 0..e {
         for i in 0..e {
-            let (u, v) = ((i as f64 - 1.0) / GRID as f64, (j as f64 - 1.0) / GRID as f64);
+            let (u, v) = grid_uv(i, j);
             let (uc, vc) = (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
             let raw = height_at(uc, vc);
             let (mx, my) = (((uc * MASK as f64) as usize).min(MASK - 1), ((vc * MASK as f64) as usize).min(MASK - 1));
-            let water = mask[(my * MASK + mx) * 4] > 127;
-            let h = if water && elev.is_none() { 0.0 } else if water { raw.max(0.0) } else { raw };
-            let (lat, lon) = id.lat_lon(u, v);
-            pts[j * e + i] = geo::lla_to_pos(lat, lon, h as f64) - center;
+            let offset = (my * MASK + mx) * 4;
+            let water = mask[offset] > 127;
+            let ocean = water && mask[offset + 1] == 80;
+            // Terrarium is a terrain DEM. A positive sample near a shore
+            // can be the adjacent mountain or a sensor error, not sea level.
+            let h = if ocean || water && elev.is_none() { 0.0 } else if water { raw.max(0.0) } else { raw };
             hs[j * e + i] = (h, raw, water);
+        }
+    }
+    for j in 0..e {
+        for i in 0..e {
+            let idx = j * e + i;
+            let (mut height, _, water) = hs[idx];
+            if !water && (2..GV).contains(&i) && (2..GV).contains(&j) {
+                let ring = [idx - e - 1, idx - e, idx - e + 1, idx - 1, idx + 1, idx + e - 1, idx + e, idx + e + 1];
+                if ring.iter().all(|&k| !hs[k].2) {
+                    height = clean_land_spike(height, ring.map(|k| hs[k].1), spacing);
+                }
+            }
+            hs[idx].0 = height;
+            let (u, v) = grid_uv(i, j);
+            let (lat, lon) = id.lat_lon(u, v);
+            pts[idx] = geo::lla_to_pos(lat, lon, f64::from(height)) - center;
         }
     }
     let mask_mips = mip_chain(mask, MASK, 4);
@@ -1608,6 +1641,31 @@ mod fallback_tests {
         let coarse = color_mip_chain(pixels.to_vec(), 2, 2);
         assert_eq!(coarse[1], [188, 188, 188, 128]);
         assert_eq!(mip_chain(pixels.to_vec(), 2, 4)[1], [128; 4]);
+    }
+
+    #[test]
+    fn coastal_terrain_keeps_ocean_at_zero_and_inland_water_at_elevation() {
+        let cache = std::env::temp_dir().join(format!("fableflight-coastal-{}", std::process::id()));
+        let src = Sources::new(Fetcher::new(cache, true), String::new());
+        let id = TileId::at(21.31_f64.to_radians(), -157.88_f64.to_radians(), DATA_ZOOM);
+        let rectangle = |x0, x1| vec![vec![[x0, 0.0], [x1, 0.0], [x1, 4096.0], [x0, 4096.0]]];
+        src.vec.lock().put(id, Arc::new(VecTile {
+            extent: 4096.0,
+            water: vec![(1, rectangle(0.0, 1400.0)), (2, rectangle(2700.0, 4096.0))],
+            ..Default::default()
+        }));
+        src.elev.lock().put(id, Arc::new(ElevTile { n: 2, h: vec![180.0; 4], pad: 0 }));
+        let tile = build_tile(&src, id).unwrap();
+        let middle = (GV / 2) * GV;
+        assert!(tile.water[middle + 5] && tile.water[middle + GV - 6]);
+        assert_eq!(tile.heights[middle + 5], 0.0);
+        assert_eq!(tile.heights[middle + GV - 6], 180.0);
+    }
+
+    #[test]
+    fn isolated_land_spikes_are_filtered_without_rounding_ridges() {
+        assert_eq!(clean_land_spike(66.0, [10.0; 8], 36.0), 10.0);
+        assert_eq!(clean_land_spike(66.0, [10.0, 20.0, 35.0, 12.0, 52.0, 20.0, 30.0, 40.0], 36.0), 66.0);
     }
 
     #[test]

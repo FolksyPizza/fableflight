@@ -493,10 +493,20 @@ impl World {
                 let (x, y) = ((u * GRID as f64).clamp(0.0, GRID as f64 - 1e-6), (v * GRID as f64).clamp(0.0, GRID as f64 - 1e-6));
                 let (x0, y0) = (x as usize, y as usize);
                 let (fx, fy) = ((x - x0 as f64) as f32, (y - y0 as f64) as f32);
-                let g = |i: usize, j: usize| t.heights[j * GV + i];
-                let h = (g(x0, y0) * (1.0 - fx) + g(x0 + 1, y0) * fx) * (1.0 - fy) + (g(x0, y0 + 1) * (1.0 - fx) + g(x0 + 1, y0 + 1) * fx) * fy;
                 let w = t.water[(y + 0.5) as usize * GV + (x + 0.5) as usize];
-                let mut h = h as f64;
+                let i = y0 * GV + x0;
+                let indices = [i, i + 1, i + GV, i + GV + 1];
+                let weights = [(1.0 - fx) * (1.0 - fy), fx * (1.0 - fy), (1.0 - fx) * fy, fx * fy];
+                let mut sum = 0.0;
+                let mut weight = 0.0;
+                for (index, blend) in indices.into_iter().zip(weights) {
+                    // The ocean cannot inherit a coastal cliff through bilinear interpolation.
+                    if !w || t.water[index] {
+                        sum += t.heights[index] * blend;
+                        weight += blend;
+                    }
+                }
+                let mut h = f64::from(sum / weight.max(f32::EPSILON));
                 // Water rides the ocean's long waves, as much as it shows them.
                 let s = |i: usize, j: usize| t.sea[j * GV + i];
                 let sea = (s(x0, y0) * (1.0 - fx) + s(x0 + 1, y0) * fx) * (1.0 - fy) + (s(x0, y0 + 1) * (1.0 - fx) + s(x0 + 1, y0 + 1) * fx) * fy;

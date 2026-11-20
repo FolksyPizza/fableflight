@@ -961,6 +961,7 @@ pub struct Renderer {
     glow_tex: wgpu::Texture,
     /// the start screen globe's cloud map (globeclouds.rs)
     gclouds_tex: wgpu::Texture,
+    globe_relief: Vec<u8>,
     build_ub: wgpu::Buffer,
     obj_ub: wgpu::Buffer,
     bg_obj: wgpu::BindGroup,
@@ -1706,9 +1707,20 @@ impl Renderer {
         let light_cover_view = view(&light_cover);
         let glow_tex = make_tex(d, "city glow", crate::skyglow::N as u32, crate::skyglow::N as u32, 1, 1, wgpu::TextureFormat::Rgba16Float, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
         let glow_view = view(&glow_tex);
-        // (cleared to zero: no clouds until a map comes in)
-        let gclouds_tex = make_tex(d, "globe clouds", crate::globeclouds::W, crate::globeclouds::H, 1, 1, wgpu::TextureFormat::R8Unorm, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
-        let gclouds_view = view(&gclouds_tex);
+        let (cw, ch) = (crate::globeclouds::W, crate::globeclouds::H);
+        let mut globe_relief = Vec::with_capacity((cw * ch) as usize);
+        for y in 0..ch {
+            let lat = (0.5 - (f64::from(y) + 0.5) / f64::from(ch)) * std::f64::consts::PI;
+            for x in 0..cw {
+                let lon = ((f64::from(x) + 0.5) / f64::from(cw) - 0.5) * std::f64::consts::TAU;
+                let height = crate::sources::fallback_height(lat, lon).clamp(0.0, 9_000.0);
+                globe_relief.push(((height / 9_000.0).sqrt() * 255.0).round() as u8);
+            }
+        }
+        // Red is live cloud cover, green is the fixed height of the land.
+        let cloud_relief: Vec<u8> = globe_relief.iter().flat_map(|&height| [0, height]).collect();
+        let gclouds_view = upload_mips_rect(d, &queue, "globe clouds and relief", (cw, ch), wgpu::TextureFormat::Rg8Unorm, 2, &[cloud_relief]);
+        let gclouds_tex = gclouds_view.texture().clone();
         let earth = crate::sources::globe_image();
         let (gw, gh) = earth.dimensions();
         let rgba = crate::sources::NightLights::get().globe_rgba(earth);
@@ -2288,7 +2300,7 @@ impl Renderer {
             casc_ub, bg_casc, bg_tileu, l_dres, l_ao, p_gtao, p_ao_blur, p_dres, p_road, p_field, p_lights, dyn_lights, p_approach, approach_buf, p_rain, p_veil, p_bolt, bolt_buf, p_tree, p_tree_near, imp, p_tree_shadow, p_tree_shadow_fixed, p_card, near_buf, p_inst, p_inst_shadow, inst_buf, fall_buf, tree_lib: None, inst_lib: None,
             gpu_timer: crate::gputime::GpuTimer::new(&device, &queue),
             globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res, bg0_src, scale: gfx.scale, ao: gfx.ao, cloud_step: gfx.cloud_step(), l_tile, l_build, l_composite, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
-            tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, light_cover, light_cover_view, glow_tex, gclouds_tex, build_ub, obj_ub, bg_obj, l_obj, paint_ub, tile_ibuf, tile_nidx: ix.len() as u32,
+            tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, light_cover, light_cover_view, glow_tex, gclouds_tex, globe_relief, build_ub, obj_ub, bg_obj, l_obj, paint_ub, tile_ibuf, tile_nidx: ix.len() as u32,
             p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_idx, tess_buf, tess_cap, cell_ibuf, p_build, p_build_whole, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, obj_src, pl_obj, obj_fast: None, obj_fast_rx: None, p_glass, p_composite, p_composite_edge, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit, p_logo,
             psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, logo_font: crate::logo::find_font(), logo_key: None, surface, config, queue, device, stats: [0.0; 4], headless: false, presented: false, integrated,
         })
@@ -2435,10 +2447,11 @@ impl Renderer {
         if px.len() != (w * h) as usize {
             return;
         }
+        let layer: Vec<u8> = px.iter().zip(&self.globe_relief).flat_map(|(&cloud, &height)| [cloud, height]).collect();
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &self.gclouds_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            px,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w), rows_per_image: Some(h) },
+            &layer,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 2), rows_per_image: Some(h) },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
     }
