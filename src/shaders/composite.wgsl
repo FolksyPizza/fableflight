@@ -617,7 +617,7 @@ fn composite_sample(in: FsIn, z: f32, c0: vec4f, a0: vec4f, amb: f32) -> vec3f {
   let gk = globe_k();
   var gc = vec3f(0.0);
   if (gk > 0.0) {
-    gc = globe_sky(rd, fract(jit + G.time.w * 0.618034));
+    gc = globe_sky(rd, globe_jitter(jit));
     if (gk >= 1.0) {
       if (cov < 0.996) { gc = mix(sky_color(rd, jit), gc, cov); }
       return clamp(gc, vec3f(0.0), vec3f(3000.0));

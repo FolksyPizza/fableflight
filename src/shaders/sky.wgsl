@@ -78,11 +78,17 @@ fn moon_disc(rd: vec3f) -> vec3f {
 // How dark it is at the camera (1 = full night).
 fn night_cam() -> f32 { return 1.0 - smoothstep(-0.2, 0.05, dot(G.up.xyz, G.sun_dir.xyz)); }
 
+// A static orbital composition uses midpoint integration. Per-pixel
+// dithering shows up as a visible blue checker in broad, smooth ocean.
+fn globe_jitter(jit: f32) -> f32 {
+  return select(fract(jit + G.time.w * 0.618034), 0.5, G.start.x > 1.5);
+}
+
 fn sky_color(rd: vec3f, jit: f32) -> vec3f {
   let gk = globe_k();
   var globe = vec3f(0.0);
   if (gk > 0.0) {
-    globe = globe_sky(rd, fract(jit + G.time.w * 0.618034));
+    globe = globe_sky(rd, globe_jitter(jit));
     if (gk >= 1.0) { return globe; }
   }
   let oc = -G.planet.xyz;
