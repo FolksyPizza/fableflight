@@ -63,6 +63,15 @@ def build(tag, notify, cancelled):
     destination = INSTALL / tag / EXE
     if destination.is_file():
         return destination
+    if sys.platform.startswith("linux"):
+        check = subprocess.run(
+            ["bash", str(ROOT / "scripts" / "build-linux.sh"), "--check"],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        if check.returncode:
+            raise RuntimeError(check.stderr.strip() or "Linux build prerequisites check failed")
+    if cancelled.is_set():
+        return None
     INSTALL.mkdir(parents=True, exist_ok=True)
     log_path = INSTALL / "build.log"
     settings = {"start_new_session": True} if os.name != "nt" else {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}

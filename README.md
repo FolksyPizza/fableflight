@@ -34,20 +34,19 @@ cd fableflight
 
 **Linux**
 
-Install the build dependencies for your distribution.
+Install the build dependencies for your distribution once. The runtime libraries alone do not provide the `libudev.pc` and `alsa.pc` files Cargo needs.
 
 | Distribution | Command |
 | --- | --- |
-| Debian or Ubuntu | `sudo apt install build-essential pkg-config libasound2-dev libudev-dev` |
+| Debian or Ubuntu | `sudo apt update && sudo apt install build-essential pkg-config libasound2-dev libudev-dev` |
 | Fedora | `sudo dnf install gcc pkgconf-pkg-config alsa-lib-devel systemd-devel` |
 | Arch Linux | `sudo pacman -S --needed base-devel pkgconf alsa-lib systemd-libs` |
 
 ```sh
-./scripts/build-linux.sh
 cargo run --release --locked
 ```
 
-If the helper reports missing libraries, install the packages above and check `pkg-config --modversion alsa libudev`. If the compiler or linker is killed during the release build, try thin link-time optimization and fewer build jobs.
+If Cargo reports missing `libudev` on Ubuntu, install the packages above and rerun Cargo. The command `./scripts/build-linux.sh --check` checks the native prerequisites, and `pkg-config --modversion alsa libudev` shows the detected versions. If the compiler or linker is killed during the release build, try thin link-time optimization and fewer build jobs.
 
 ```sh
 CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 ./scripts/build-linux.sh --jobs 2
@@ -70,10 +69,12 @@ To install the executable from this checkout, run `cargo install --path . --lock
 
 ```sh
 git pull --ff-only
-python3 scripts/launch.py
+cargo run --release --locked
 ```
 
-The launcher opens before the simulator builds. It shows aircraft photography, build progress, and **Skip update** when a previous build is available. The new build opens automatically after a successful update. An unchanged Git revision opens its installed copy. The first build can take several minutes. For a terminal-only run use `python3 scripts/launch.py --no-ui`. The window uses Python's Tk interface. On macOS, the Python installer from python.org includes Tk. If a build fails, see `target/launcher/build.log` and use **Skip update** to open the previous build.
+Cargo builds the pulled changes and starts Fable Flight. For the optional graphical update window, run `python3 scripts/launch.py` in place of the Cargo command after pulling.
+
+The launcher opens before the simulator builds. On Linux it checks for the required development packages before compiling. It shows aircraft photography, build progress, and **Skip update** when a previous build is available. The new build opens automatically after a successful update. An unchanged Git revision opens its installed copy. The first build can take several minutes. For a terminal-only run use `python3 scripts/launch.py --no-ui`. The window uses Python's Tk interface. On macOS, the Python installer from python.org includes Tk. If a build fails, see `target/launcher/build.log` and use **Skip update** to open the previous build.
 
 This workflow builds the pulled source in the background. Use a clean checkout when you want the launcher to pick up a new revision. For a Cargo-installed copy, rerun the install command after pulling.
 
