@@ -299,7 +299,9 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   let wc = wave_coord(P);
   let t = G.time.x;
   let cosv = max(dot(-V, upn), 0.03);
-  let fp = dist * G.misc.w / cosv;                // pixel footprint along the view direction, metres
+  // At grazing angles one pixel covers a long strip of water. Keep the
+  // lighting's cosine guard separate so it cannot expose undersampled waves.
+  let fp = dist * G.misc.w / max(dot(-V, upn), 0.006);
   var st = sea_state(wclass, upn.z, shore);
   let wind = G.ocean[1].x;
 
@@ -337,7 +339,9 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   // over the cascades that move it most), then read its slopes.
   let xo = ocean_coord(P);
   var lod = vec3f(0.0);
-  for (var c = 0; c < 3; c++) { lod[c] = log2(max(fp * 256.0 / ocean_size(c), 1.0)); }
+  // Filter slopes and displacement at the same scale as the variance
+  // lookup below, which moves the lost wave energy into the specular lobe.
+  for (var c = 0; c < 3; c++) { lod[c] = log2(max(fp * 384.0 / ocean_size(c), 1.0)); }
   var x0 = xo;
   var hgt = 0.0;
   for (var it = 0; it < 2; it++) {
@@ -486,7 +490,10 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   if (wclass > 2.5) { turb = 3.2; body = vec3f(0.045, 0.048, 0.022); weedy = 0.9; }
   else if (wclass > 1.5) { turb = 1.5; body = vec3f(0.012, 0.03, 0.022); weedy = 1.1; }
   let tl = max(luma(tint), 0.015);
-  body = mix(body, tint / tl * luma(body), 0.4);
+  // Baked satellite reflections and color corrections can differ from tile
+  // to tile. Retain the tint in shallow water, where it describes the coast.
+  let image_tint = 0.36 * (1.0 - smoothstep(1.8, 10.0, wd));
+  body = mix(body, tint / tl * luma(body), image_tint);
   let ext = vec3f(0.36, 0.052, 0.024) + vec3f(0.22, 0.2, 0.3) * turb;
 
   // Refraction down to the bed.

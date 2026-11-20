@@ -517,7 +517,9 @@ impl Sources {
                 y >= 0 && y < size && self.vector(TileId::new(id.z, x as u32, y as u32)).is_ok_and(|vt| vt.has_aero())
             }))
         };
-        let t = Arc::new(if aero { self.level_airfield(id, &raw) } else { self.padded(id, &raw) });
+        let mut tile = if aero { self.level_airfield(id, &raw) } else { self.padded(id, &raw) };
+        correct_coastal_approaches(id, &mut tile);
+        let t = Arc::new(tile);
         self.elev.lock().put(id, t.clone());
         Ok(t)
     }
@@ -1314,7 +1316,7 @@ impl RunwayRelief {
                     continue;
                 }
                 let runway = Self { start, span, span_sq, half_width: f64::from(r.width) * 0.5, elevation: airport.elev, paved: r.paved };
-                if runway.distance(center) < radius + runway.half_width + 350.0 {
+                if runway.distance(center) < radius + runway.half_width + 450.0 {
                     runways.push(runway);
                 }
             }
@@ -1326,6 +1328,74 @@ impl RunwayRelief {
         let offset = pos - self.start;
         let t = (offset.dot(self.span) / self.span_sq).clamp(0.0, 1.0);
         (offset - self.span * t).length()
+    }
+}
+
+struct CoastalApproach {
+    end: DVec3,
+    outbound: DVec3,
+    across: DVec3,
+    half_width: f64,
+    elevation: f32,
+}
+
+impl CoastalApproach {
+    fn at(runway: &RunwayRelief, end: DVec3, along: DVec3) -> Option<Self> {
+        // Test beyond the physical threshold, where the coarse relief
+        // can detect open water even if the fine source has raised it.
+        let offshore = [220.0, 360.0].into_iter().any(|d| {
+            let (lat, lon, _) = geo::pos_to_lla(end + along * d);
+            fallback_height(lat, lon) < -1.0
+        });
+        offshore.then(|| Self {
+            end, outbound: along, across: end.normalize().cross(along).normalize(),
+            half_width: runway.half_width, elevation: runway.elevation,
+        })
+    }
+
+    fn correct(&self, p: DVec3, height: f32) -> f32 {
+        let offset = p - self.end;
+        let along = offset.dot(self.outbound);
+        let across = offset.dot(self.across).abs();
+        let ceiling = self.elevation + 1.0 + along.max(0.0) as f32 * 0.013;
+        if !(0.0..390.0).contains(&along) || across >= self.half_width + 80.0 || height <= ceiling {
+            return height;
+        }
+        let ease = |x: f64| {
+            let t = x.clamp(0.0, 1.0) as f32;
+            t * t * (3.0 - 2.0 * t)
+        };
+        let weight = ease(along / 22.0) * (1.0 - ease((along - 235.0) / 155.0))
+            * (1.0 - ease((across - self.half_width - 30.0) / 50.0));
+        height - (height - ceiling) * weight
+    }
+}
+
+/// Correct narrow low-elevation runway corridors in the shared elevation
+/// source so runway meshes, the terrain and collision all see the same ground.
+fn correct_coastal_approaches(id: TileId, tile: &mut ElevTile) {
+    if id.z < 12 { return; }
+    let approaches: Vec<_> = RunwayRelief::near(id).into_iter()
+        .filter(|runway| runway.paved && runway.elevation <= 25.0)
+        .flat_map(|runway| {
+            let direction = runway.span.normalize();
+            [CoastalApproach::at(&runway, runway.start, -direction),
+                CoastalApproach::at(&runway, runway.start + runway.span, direction)]
+        })
+        .flatten().collect();
+    if approaches.is_empty() { return; }
+    let n = tile.n as f64;
+    let pad = tile.pad as f64;
+    let dimension = tile.n + tile.pad * 2;
+    let minimum = approaches.iter().map(|a| a.elevation + 1.0).fold(f32::INFINITY, f32::min);
+    for (index, height) in tile.h.iter_mut().enumerate() {
+        if *height <= minimum { continue; }
+        let uv = |i| (i as f64 + 0.5 - pad) / n;
+        let (lat, lon) = id.lat_lon(uv(index % dimension), uv(index / dimension));
+        let p = geo::lla_to_pos(lat, lon, 0.0);
+        for approach in &approaches {
+            *height = approach.correct(p, *height);
+        }
     }
 }
 
@@ -1729,6 +1799,49 @@ mod fallback_tests {
         assert!(left.into_iter().zip(right).all(|(a, b)| a.abs_diff(b) <= 8));
         for (_, tile) in detail.patches {
             assert_eq!(tile.unwrap().dimensions(), (902, 902));
+        }
+    }
+
+    #[test]
+    fn laguardia_coastal_runway_spike_is_cut_back_without_flattening_the_runway() {
+        let airport = &crate::airports::Db::get().apts[crate::airports::Db::get().find("KLGA").unwrap() as usize];
+        let runway = airport.rwys.iter().find(|r| r.ident[0] == "04").unwrap();
+        let pos = |end: usize| {
+            let (lat, lon) = runway.pos[end].unwrap();
+            geo::lla_to_pos(lat.to_radians(), lon.to_radians(), 0.0)
+        };
+        let (a, b) = (pos(0), pos(1));
+        let direction = (b - a).normalize();
+        let sample = b + direction * 60.0;
+        let (lat, lon, _) = geo::pos_to_lla(sample);
+        let id = TileId::at(lat, lon, DATA_ZOOM);
+        let (u, v) = id.frac(lat, lon);
+        let mut tile = ElevTile { h: vec![49.0; 256 * 256], n: 256, pad: 0 };
+        correct_coastal_approaches(id, &mut tile);
+        assert!(tile.sample(u, v) < 10.0, "the approach spike survived");
+
+        let (lat, lon, _) = geo::pos_to_lla(b - direction * 45.0);
+        let (u, v) = id.frac(lat, lon);
+        assert!((tile.sample(u, v) - 49.0).abs() < 0.1, "correction reached runway pavement");
+        let side = b.normalize().cross(direction);
+        let (lat, lon, _) = geo::pos_to_lla(sample + side * 140.0);
+        let (u, v) = id.frac(lat, lon);
+        assert!((tile.sample(u, v) - 49.0).abs() < 0.1, "correction spread into neighboring terrain");
+
+        // Optional replay using the real Terrarium tiles in a local cache.
+        // CI exercises the synthetic ridge above without any network access.
+        if let Some(cache) = std::env::var_os("FABLE_TEST_LGA_CACHE") {
+            let source = Sources::new(Fetcher::new(cache.into(), true), String::new());
+            let raw = source.elev_raw(id).unwrap();
+            let fixed = source.elev(id).unwrap();
+            let peak = |tile: &ElevTile| (35..=120).step_by(3).map(|m| {
+                let (lat, lon, _) = geo::pos_to_lla(b + direction * f64::from(m));
+                let (u, v) = id.frac(lat, lon);
+                tile.sample(u, v)
+            }).fold(f32::NEG_INFINITY, f32::max);
+            let (before, after) = (peak(&raw), peak(&fixed));
+            eprintln!("KLGA runway 04 departure end: {before:.1} m raw, {after:.1} m corrected");
+            assert!(before > 40.0 && after < 10.0);
         }
     }
 
