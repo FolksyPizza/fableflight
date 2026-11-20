@@ -54,6 +54,16 @@ fn tree_jit(ia: vec4f) -> f32 {
   let h2 = (h ^ (h >> 15u)) * 0x2C1B3C6Du;
   return 1.0 + LOD_JITTER * (f32((h2 ^ (h2 >> 12u)) & 0xFFFFu) / 32767.5 - 1.0);
 }
+// A streamed tile reveals trees in a fixed order shared by their models,
+// leaf cards, impostors and shadows. Settled tiles and loose trees skip it.
+fn tree_arrived(ia: vec4f) -> bool {
+  if (T.offset.w >= 0.0) { return true; }
+  let h = (bitcast<u32>(ia.z) * 0x9E3779B9u) ^ (bitcast<u32>(ia.x) * 0x85EBCA6Bu);
+  let spread = (h ^ (h >> 15u)) * 0x2C1B3C6Du;
+  let rank = f32((spread ^ (spread >> 12u)) & 0xFFFFu) / 65536.0;
+  let t = clamp(1.0 + T.offset.w, 0.0, 1.0);
+  return rank < t * t * (3.0 - 2.0 * t);
+}
 fn lod_of(d: f32, ia: vec4f) -> f32 {
   let dj = d / tree_jit(ia);
   return step(260.0, dj) + step(600.0, dj) + step(1200.0, dj) + step(2200.0, dj);
@@ -126,7 +136,7 @@ fn tree_world(pos: vec3f, nrm: vec3f, leaf: f32, ia: vec4f, ib: vec4f, far: f32,
 fn solid_vertex(pos: vec3f, nrm: vec3f, col: vec4f, ia: vec4f, ib: vec4f, tint: vec4f, uv: vec4f, aux: vec4f) -> VOut {
   var o: VOut;
   o.clip = vec4f(2.0, 2.0, 0.0, 1.0);
-  if (other_lod(uv.x, ia, tint.a * 255.0)) { return o; }
+  if (!tree_arrived(ia) || other_lod(uv.x, ia, tint.a * 255.0)) { return o; }
   let leaf = step(0.5, col.a);
   // Close up the foliage masses draw in to become the shaded inside of the
   // crown, and the leaf cards carry the outside.
@@ -149,13 +159,13 @@ fn solid_vertex(pos: vec3f, nrm: vec3f, col: vec4f, ia: vec4f, ib: vec4f, tint: 
   return o;
 }
 @vertex fn vs_shadow(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(2) col: vec4f, @location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f, @location(6) uv: vec4f) -> @builtin(position) vec4f {
-  if (other_lod(uv.x, ia, tint.a * 255.0) || photo_shadow_gone(ia.xyz + T.offset.xyz)) { return vec4f(2.0, 2.0, 0.0, 1.0); }
+  if (!tree_arrived(ia) || other_lod(uv.x, ia, tint.a * 255.0) || photo_shadow_gone(ia.xyz + T.offset.xyz)) { return vec4f(2.0, 2.0, 0.0, 1.0); }
   return CS.vp * vec4f(tree_world(pos, nrm, step(0.5, col.a), ia, ib, tint.a * 255.0, vec2f(0.0)).P, 1.0);
 }
 // Whole batches drawn with the one model they are given (the second cascade).
 @vertex fn vs_shadow_fixed(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(2) col: vec4f, @location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f) -> @builtin(position) vec4f {
   // (a tree under the 3D tiles' mesh casts nothing: the mesh's own tree does)
-  if (photo_shadow_gone(ia.xyz + T.offset.xyz)) { return vec4f(2.0, 2.0, 0.0, 1.0); }
+  if (!tree_arrived(ia) || photo_shadow_gone(ia.xyz + T.offset.xyz)) { return vec4f(2.0, 2.0, 0.0, 1.0); }
   return CS.vp * vec4f(tree_world(pos, nrm, step(0.5, col.a), ia, ib, tint.a * 255.0, vec2f(0.0)).P, 1.0);
 }
 
@@ -173,6 +183,9 @@ fn crown_cover(cl: f32, fw: f32, facing: f32, amount: f32) -> f32 {
   return mix(sharp, 1.0 - 0.9 * cut, smoothstep(0.12, 0.45, fw)) * step(0.001, amount) + (1.0 - step(0.001, amount));
 }
 @vertex fn vs_card(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(2) col: vec4f, @location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f, @location(6) uv: vec4f, @location(7) aux: vec4f) -> CVOut {
+  var off: CVOut;
+  off.clip = vec4f(2.0, 2.0, 0.0, 1.0);
+  if (!tree_arrived(ia)) { return off; }
   let far = tint.a * 255.0;
   // Sprays come out one by one as a tree gets closer; undergrowth grows as a whole.
   // Further off, the sprays are a little smaller (as baked into the impostors).
@@ -660,6 +673,7 @@ struct IOut {
 @vertex fn vs_imp(@location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f, @builtin(vertex_index) vi: u32) -> IOut {
   var o: IOut;
   o.clip = vec4f(2.0, 2.0, 0.0, 1.0);
+  if (!tree_arrived(ia)) { return o; }
   let base = ia.xyz + T.offset.xyz;
   let d = length(base);
   let blend = imp_blend(ia, d);

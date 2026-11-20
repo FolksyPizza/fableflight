@@ -53,11 +53,7 @@ struct BTile {
     near_idx: Vec<u32>,
     ax: [f32; 4],
     ay: [f32; 4],
-    /// seconds the tile has been shown, and has been close enough for the
-    /// middle and the finest level of detail (for fading them in)
-    shown: f32,
-    mid_t: f32,
-    fine_t: f32,
+    visibility: SceneryVisibility,
     /// distance scale of its tallest height class (buildings::HCLASS)
     tall: f32,
 }
@@ -223,6 +219,47 @@ const CAR_TAIL: f32 = 12.0;
 
 const LOD_MID: f32 = buildings::BFAR[1];
 const LOD_FINE: f32 = 700.0;
+
+/// Blend newly uploaded detail into live flight. For a prepared shot the
+/// uploaded levels can follow their existing shader distance fades immediately.
+#[derive(Default)]
+struct SceneryVisibility {
+    shown: f32,
+    mid_t: f32,
+    fine_t: f32,
+}
+
+impl SceneryVisibility {
+    const MID_DELAY: f32 = 0.3;
+    const MID_FADE: f32 = 1.2;
+    const FINE_DELAY: f32 = 0.6;
+    const FINE_FADE: f32 = 1.6;
+
+    fn advance(&mut self, dt: f32, dist: f32, scale: f32, preparing: bool) {
+        self.shown = (self.shown + dt).min(1.0);
+        let (mid, fine) = (LOD_MID * scale, LOD_FINE * scale);
+        let mid_full = Self::MID_DELAY + Self::MID_FADE;
+        let fine_full = Self::FINE_DELAY + Self::FINE_FADE;
+        if preparing {
+            self.mid_t = mid_full;
+            self.fine_t = fine_full;
+        } else {
+            self.mid_t = if dist < mid { (self.mid_t + dt).min(mid_full) } else if dist > mid * 1.1 { 0.0 } else { self.mid_t };
+            self.fine_t = if dist < fine { (self.fine_t + dt).min(fine_full) } else if dist > fine * 1.2 { 0.0 } else { self.fine_t };
+        }
+    }
+
+    fn weights(&self) -> [f32; 3] {
+        let fade = |t: f32, delay: f32, duration: f32| {
+            if t >= delay + duration { 1.0 } else { ((t - delay) / duration).clamp(0.0, 1.0) }
+        };
+        [
+            fade(self.mid_t, Self::MID_DELAY, Self::MID_FADE),
+            fade(self.fine_t, Self::FINE_DELAY, Self::FINE_FADE),
+            self.shown,
+        ]
+    }
+}
 
 pub struct World {
     /// flat ground everywhere tiles have not loaded, at this height (for tests)
@@ -1042,11 +1079,8 @@ impl World {
                     Some(BSlot::Ready(b)) => {
                         b.last_used = self.frame;
                         let dist = ((b.center - cam).length() - b.radius) as f32;
-                        b.shown += real_dt;
                         // Towers carry their detail farther (buildings::HCLASS).
-                        let (mid, fine) = (LOD_MID * b.tall * self.city_k, LOD_FINE * b.tall * self.city_k);
-                        b.mid_t = if dist < mid { b.mid_t + real_dt } else if dist > mid * 1.1 { 0.0 } else { b.mid_t };
-                        b.fine_t = if dist < fine { b.fine_t + real_dt } else if dist > fine * 1.2 { 0.0 } else { b.fine_t };
+                        b.visibility.advance(real_dt, dist, b.tall * self.city_k, !departure_views.is_empty());
                         if b.gpu.is_some() {
                             self.draw_b.push(id);
                             self.in_view.push(fr.sphere(b.center - cam, b.radius));
@@ -1114,15 +1148,16 @@ impl World {
 
         self.wanted.drain(..sent);
 
-        // Evict what has not been needed for a while.
+        // At high refresh rates the descent can outlast the normal frame
+        // ages. Keep prepared terrain and buildings resident through the shot.
         if self.frame % 120 == 0 {
             let f = self.frame;
-            if self.tiles.len() > 700 {
+            if !descent && self.tiles.len() > 700 {
                 self.tiles.retain(|id, s| id.z <= 3 || !matches!(s, Slot::Ready(t) if f - t.last_used > 600));
             }
             self.tiles.retain(|_, s| !matches!(s, Slot::Failed) || f % 3600 != 0);
             self.builds.retain(|_, s| match s {
-                BSlot::Ready(b) => f - b.last_used <= 900,
+                BSlot::Ready(b) => descent || f - b.last_used <= 900,
                 BSlot::RetryAfter(t) => now < *t,
                 BSlot::Loading => true,
             });
@@ -1248,7 +1283,7 @@ impl World {
             let main = bd.cls[0];
             let tall = (0..buildings::HCLASS.len()).find(|&c| main[c] > if c == 0 { 0 } else { main[c - 1] }).map_or(1.0, |c| buildings::HCLASS[c].1);
             let cars = cars::spawn(&bd.net, id.x.wrapping_mul(2246822519) ^ id.y.wrapping_mul(3266489917));
-            self.builds.insert(id, BSlot::Ready(Box::new(BTile { center: bd.center, radius: bd.radius, gpu: Some(gpu), footprints: bd.footprints, last_used: self.frame, net: bd.net, cars, parked: bd.parked, trees: bd.trees, tree_var: bd.tree_var, chunks: bd.chunks, under: bd.under, cells: bd.cells, near_idx: bd.near_idx, ax: bd.ax, ay: bd.ay, shown: 0.0, mid_t: 0.0, fine_t: 0.0, tall })));
+            self.builds.insert(id, BSlot::Ready(Box::new(BTile { center: bd.center, radius: bd.radius, gpu: Some(gpu), footprints: bd.footprints, last_used: self.frame, net: bd.net, cars, parked: bd.parked, trees: bd.trees, tree_var: bd.tree_var, chunks: bd.chunks, under: bd.under, cells: bd.cells, near_idx: bd.near_idx, ax: bd.ax, ay: bd.ay, visibility: SceneryVisibility::default(), tall })));
         }
         bytes
     }
@@ -1500,7 +1535,7 @@ impl World {
             if let Some(BSlot::Ready(b)) = self.builds.get(id) {
                 let (x, y) = (id.x as i64 - base.0, id.y as i64 - base.1);
                 if (0..n as i64).contains(&x) && (0..n as i64).contains(&y) {
-                    shown[y as usize * n + x as usize] = b.shown.clamp(0.0, 1.0);
+                    shown[y as usize * n + x as usize] = b.visibility.shown;
                 }
             }
         }
@@ -1687,8 +1722,7 @@ impl World {
                     near.push(NearDraw { mesh: mesh + CARDS, first, count, cards: true });
                 }
             }
-            let fade = |t: f32, secs: f32| (t / secs).clamp(0.0, 1.0);
-            let lod = [fade(b.mid_t - 0.3, 1.2), fade(b.fine_t - 0.6, 1.6), fade(b.shown, 1.0)];
+            let lod = b.visibility.weights();
             // How many height classes, tallest first, are near enough for their
             // full geometry, their middle level and their finest level.
             let ck = self.city_k;
@@ -1702,7 +1736,9 @@ impl World {
             let reach = [buildings::BFAR[1], LOD_MID, LOD_FINE].map(|r| buildings::HCLASS.iter().take_while(|c| dist < r * c.1 * ck).count() as u8);
             details.push(DetailDraw {
                 gpu: g,
-                u: [o.x, o.y, o.z, 0.0, b.ax[0], b.ax[1], b.ax[2], b.ax[3], b.ay[0], b.ay[1], b.ay[2], b.ay[3], lod[0], lod[1], lod[2], 0.0],
+                // Negative offset.w ranks the arrival of static trees. Zero
+                // means fully visible, and the loose-tree slot still uses +1.
+                u: [o.x, o.y, o.z, lod[2] - 1.0, b.ax[0], b.ax[1], b.ax[2], b.ax[3], b.ay[0], b.ay[1], b.ay[2], b.ay[3], lod[0], lod[1], lod[2], 0.0],
                 view: *view,
                 near: dist < 3000.0,
                 far: if o.length() + (b.radius as f32) < buildings::BFAR[0] * ck { 0 } else if reach[0] == 0 { 2 } else { 1 },
@@ -1780,6 +1816,26 @@ impl Tag for TileId {
 #[cfg(test)]
 mod terrain_prefetch_tests {
     use super::*;
+
+    #[test]
+    fn prepared_buildings_keep_detail_through_the_flight_handoff() {
+        let mut prepared = SceneryVisibility::default();
+        prepared.advance(0.2, 5_000.0, 1.0, true);
+        assert_eq!(prepared.weights(), [1.0, 1.0, 0.2]);
+        prepared.advance(0.8, 5_000.0, 1.0, true);
+        prepared.advance(0.05, 400.0, 1.0, false);
+        assert_eq!(prepared.weights(), [1.0; 3]);
+
+        let mut live = SceneryVisibility::default();
+        live.advance(0.2, 400.0, 1.0, false);
+        assert_eq!(live.weights(), [0.0, 0.0, 0.2]);
+        live.advance(1.8, 400.0, 1.0, false);
+        let weights = live.weights();
+        assert_eq!(weights[0], 1.0);
+        assert!(weights[1] > 0.0 && weights[1] < 1.0);
+        live.advance(0.05, 5_000.0, 1.0, false);
+        assert_eq!(live.weights(), [0.0, 0.0, 1.0]);
+    }
 
     #[test]
     fn departure_prefetch_keeps_view_buffer_and_nearby_tiles() {
